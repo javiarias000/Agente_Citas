@@ -1,0 +1,90 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: arcadium-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=arcadium
+      - POSTGRES_PASSWORD=arcadium
+      - POSTGRES_DB=arcadium
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arcadium"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - arcadium-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: arcadium-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - arcadium-network
+    # Opcional: si usas Redis para cache
+
+  arcadium-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arcadium-api
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - ./logs:/app/logs
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://arcadium:arcadium@postgres:5432/arcadium
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - WHATSAPP_API_URL=${WHATSAPP_API_URL}
+      - WHATSAPP_API_TOKEN=${WHATSAPP_API_TOKEN}
+      - WHATSAPP_INSTANCE_NAME=${WHATSAPP_INSTANCE_NAME}
+      - USE_POSTGRES_FOR_MEMORY=${USE_POSTGRES_FOR_MEMORY:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENABLE_METRICS=${ENABLE_METRICS:-true}
+      - METRICS_PORT=9090
+      - DEBUG=${DEBUG:-false}
+      - CORS_ORIGINS=${CORS_ORIGINS:-["*"]}
+    ports:
+      - "8000:8000" # FastAPI
+      - "9090:9090" # Metrics (si está habilitado)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      [
+        "uvicorn",
+        "main:create_app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
+    restart: unless-stopped
+    networks:
+      - arcadium-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  arcadium-network:
+    driver: bridge
