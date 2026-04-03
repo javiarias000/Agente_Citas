@@ -17,15 +17,22 @@ Requiere:
 
 import os
 import json
+import hashlib
+import base64
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 import structlog
 import asyncio
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env al importar este módulo
+# Esto asegura que os.getenv() tenga acceso a las variables
+load_dotenv()
 
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow, Flow
+from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -47,9 +54,9 @@ class GoogleCalendarService:
     """
 
     # Scope de permisos requeridos
+    # NOTA: Usar solo 'calendar' que incluye eventos. Si se necesita separación, generar refresh token con ambos scopes.
     SCOPES = [
-        'https://www.googleapis.com/auth/calendar',  # Read/write
-        'https://www.googleapis.com/auth/calendar.events'
+        'https://www.googleapis.com/auth/calendar'  # Read/write (incluye eventos)
     ]
 
     def __init__(
@@ -87,7 +94,7 @@ class GoogleCalendarService:
         Obtiene credenciales OAuth2.
 
         Estrategia (en orden):
-        1. Usar refresh token de GOOGLE_REFRESH_TOKEN (env)
+        1. Usar refresh token de GOOGLE_REFRESH_TOKEN (settings)
         2. Usar token.json cacheado
         3. Si no hay o expira: flujo OAuth con navegador (run_local_server)
 
@@ -98,7 +105,7 @@ class GoogleCalendarService:
         token_path = os.path.join(os.path.dirname(self.credentials_path), 'token.json')
 
         # ============================================
-        # OPCIÓN 1: Refresh Token desde .env
+        # OPCIÓN 1: Refresh Token desde .env (variables de entorno)
         # ============================================
         refresh_token = os.getenv('GOOGLE_REFRESH_TOKEN')
         if refresh_token:
@@ -123,7 +130,7 @@ class GoogleCalendarService:
                     logger.error("Error usando refresh token de env", error=str(e))
                     creds = None
             else:
-                logger.warning("GOOGLE_REFRESH_TOKEN seteado pero faltan CLIENT_ID/SECRET")
+                logger.warning("GOOGLE_REFRESH_TOKEN seteado pero faltan GOOGLE_CLIENT_ID/SECRET en .env")
 
         # ============================================
         # OPCIÓN 2: Token cacheado en archivo
@@ -163,9 +170,10 @@ class GoogleCalendarService:
                     )
 
                 logger.info("Iniciando flujo OAuth con navegador...")
-                flow = InstalledAppFlow.from_client_secrets_file(
+                flow = Flow.from_client_secrets_file(
                     self.credentials_path,
-                    self.SCOPES
+                    scopes=self.SCOPES,
+                    redirect_uri=self.redirect_uri
                 )
 
                 # Usar redirect_uri si está configurado
@@ -670,7 +678,7 @@ class GoogleCalendarService:
     # ============================================
     def get_authorization_url(self) -> str:
         """
-        Genera URL de autorización OAuth2 para que el usuario autorice.
+        Genera URL de autorización OAuth2 con PKCE para que el usuario autorice.
 
         Returns:
             URL completa para autorizar la aplicación
@@ -680,20 +688,39 @@ class GoogleCalendarService:
                 f"Archivo de credenciales no encontrado: {self.credentials_path}"
             )
 
-        flow = InstalledAppFlow.from_client_secrets_file(
-            self.credentials_path,
-            self.SCOPES
-        )
-        if self.redirect_uri:
-            flow.redirect_uri = self.redirect_uri
+        # Generar code_verifier (random 32-96 bytes, luego base64url)
+        code_verifier = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8').rstrip('=')
+        # Calcular code_challenge = SHA256(code_verifier) -> base64url
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode('utf-8')).digest()
+        ).decode('utf-8').rstrip('=')
 
-        auth_url, _ = flow.authorization_url(
+        flow = Flow.from_client_secrets_file(
+            self.credentials_path,
+            scopes=self.SCOPES,
+            redirect_uri=self.redirect_uri
+        )
+
+        # Generar URL con code_challenge (PKCE)
+        auth_url, state = flow.authorization_url(
             access_type='offline',
             include_granted_scopes='true',
-            prompt='consent'  # Para forzar refresh token
+            prompt='consent',
+            code_challenge=code_challenge,
+            code_challenge_method='S256'
         )
 
-        logger.info("URL de autorización generada", url=auth_url)
+        # Guardar code_verifier para usar en el callback
+        credentials_dir = os.path.dirname(os.path.abspath(self.credentials_path))
+        verifier_file = os.path.join(credentials_dir, 'oauth_verifier.txt')
+        try:
+            with open(verifier_file, 'w') as f:
+                f.write(code_verifier)
+            logger.debug("Code verifier guardado para callback", path=verifier_file, verifier_len=len(code_verifier))
+        except Exception as e:
+            logger.warning("No se pudo guardar code_verifier", error=str(e))
+
+        logger.info("URL de autorización generada (con PKCE)", url=auth_url, state=state)
         return auth_url
 
     def exchange_code_for_tokens(self, code: str) -> Credentials:
@@ -711,20 +738,41 @@ class GoogleCalendarService:
                 f"Archivo de credenciales no encontrado: {self.credentials_path}"
             )
 
-        flow = InstalledAppFlow.from_client_secrets_file(
-            self.credentials_path,
-            self.SCOPES
-        )
-        if self.redirect_uri:
-            flow.redirect_uri = self.redirect_uri
+        # Recuperar code_verifier guardado (necesario para PKCE)
+        credentials_dir = os.path.dirname(os.path.abspath(self.credentials_path))
+        verifier_file = os.path.join(credentials_dir, 'oauth_verifier.txt')
+        code_verifier = None
+        try:
+            if os.path.exists(verifier_file):
+                with open(verifier_file, 'r') as f:
+                    code_verifier = f.read().strip()
+                logger.debug("Code verifier recuperado", verifier_len=len(code_verifier) if code_verifier else 0)
+                # Eliminar archivo después de usar (limpieza)
+                os.remove(verifier_file)
+            else:
+                logger.warning("Archivo code_verifier no encontrado", path=verifier_file)
+        except Exception as e:
+            logger.warning("No se pudo recuperar code_verifier", error=str(e))
 
-        # Intercambiar código por tokens
-        flow.fetch_token(code=code)
+        flow = Flow.from_client_secrets_file(
+            self.credentials_path,
+            scopes=self.SCOPES,
+            redirect_uri=self.redirect_uri
+        )
+
+        # Intercambiar código por tokens (con PKCE si tenemos code_verifier)
+        if code_verifier:
+            flow.fetch_token(code=code, code_verifier=code_verifier)
+        else:
+            # Sin PKCE (fallback - puede fallar con Google si requiere PKCE)
+            flow.fetch_token(code=code)
+
         creds = flow.credentials
 
         # Guardar token para futuros usos
-        token_path = os.path.join(os.path.dirname(self.credentials_path), 'token.json')
-        os.makedirs(os.path.dirname(token_path), exist_ok=True)
+        token_dir = os.path.dirname(os.path.abspath(self.credentials_path))
+        token_path = os.path.join(token_dir, 'token.json')
+        os.makedirs(token_dir, exist_ok=True)
         with open(token_path, 'w') as f:
             f.write(creds.to_json())
 
