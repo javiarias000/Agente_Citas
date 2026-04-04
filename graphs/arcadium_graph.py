@@ -596,10 +596,28 @@ async def agent_node(
                     state["current_step"] = "scheduler"
                     logger.info("Fallback direct datetime set", fecha=fecha_iso)
 
-        # Fallback 3: En scheduler, si tenemos servicio y fecha pero no appointment_id, y el usuario pide agendar
-        if current_step == "scheduler" and state.get("selected_service") is not None and state.get("datetime_preference") is not None and state.get("appointment_id") is None and user_input:
+        # Fallback 3: En scheduler, si tenemos servicio, fecha, Y NOMBRE, y NO tenemos appointment_id,
+        # y el usuario confirma o pide agendar → FORZAR agendar_cita
+        # Esto rompe el bucle de confirmación
+        if (current_step == "scheduler" and
+            state.get("selected_service") is not None and
+            state.get("datetime_preference") is not None and
+            state.get("patient_name") is not None and
+            state.get("appointment_id") is None and
+            user_input):
             text = user_input.lower()
-            if any(word in text for word in ["agenda", "reserva", "programa", "confirma"]):
+            # Palabras de confirmación + acción
+            confirmation_words = ["sí", "si", "ok", "confirmo", "confirmado", "sí por favor", "correcto", "vale", "yes", "acepto"]
+            action_words = ["agenda", "reserva", "programa", "confirma", "agendar", "reservar"]
+
+            if any(word in text for word in confirmation_words + action_words):
+                logger.info(
+                    "Fallback 3: Usuario confirmó, forzando agendar_cita",
+                    text=text[:50],
+                    service=state.get("selected_service"),
+                    fecha=state.get("datetime_preference"),
+                    nombre=state.get("patient_name")
+                )
                 agendar_tool = next((t for t in tools if t.name == "agendar_cita"), None)
                 if agendar_tool:
                     tool_id = str(uuid.uuid4())
@@ -607,8 +625,8 @@ async def agent_node(
                     try:
                         result = await agendar_tool.ainvoke({
                             "fecha": state["datetime_preference"],
-                            "service": state["selected_service"],
-                            "duration": state.get("service_duration", 30),
+                            "servicio": state["selected_service"],
+                            "nombre": state.get("patient_name"),
                             "runtime": runtime
                         })
                         if isinstance(result, Command):
@@ -628,6 +646,34 @@ async def agent_node(
                             logger.warning("agendar_cita fallback no devolvió Command")
                     except Exception as e:
                         logger.error("Fallback agendar_cita failed", error=str(e))
+        # ============================================
+        # AUTO-AJUSTE FIN DE SEMANA (info_collector)
+        # ============================================
+        if current_step == "info_collector":
+            dt_pref = state.get("datetime_preference")
+            if dt_pref and isinstance(dt_pref, str):
+                try:
+                    # Parsear ISO (puede venir con o sin zona)
+                    dt = datetime.fromisoformat(dt_pref.replace("Z", "+00:00"))
+                    if dt.weekday() >= 5:  # 5=sábado, 6=domingo
+                        # Calcular próximo lunes (misma hora)
+                        if dt.weekday() == 5:  # sábado
+                            days_to_add = 2
+                        else:  # domingo
+                            days_to_add = 1
+                        new_dt = dt + timedelta(days=days_to_add)
+                        new_iso = new_dt.strftime("%Y-%m-%dT%H:%M:%S")
+                        # Actualizar estado directamente (sin tool call)
+                        state["datetime_preference"] = new_iso
+                        logger.info(
+                            "Auto-ajuste fin de semana aplicado",
+                            old_date=dt_pref,
+                            new_date=new_iso,
+                            reason="fecha en fin de semana"
+                        )
+                except Exception as e:
+                    logger.error("Error auto-ajustando fecha fin de semana", error=str(e), exc_info=True)
+
         # ============================================
         # TRANSICIÓN AUTOMÁTICA (solo si no se forzó un cambio vía Command.goto o manual)
         # ============================================
@@ -724,6 +770,9 @@ async def save_state_node(
 
     # TODO: Guardar perfil de usuario si hay updates (determinar desde herramientas)
 
+    # ACTUALIZAR initial_message_count para evitar duplicación en el próximo turno
+    state["initial_message_count"] = len(state.get("messages", []))
+
     return state
 
 
@@ -759,7 +808,10 @@ async def delegate_to_deyy_node(
         session_id=session_id,
         current_step=state.get("current_step"),
         intent=state.get("intent"),
-        selected_service=state.get("selected_service")
+        selected_service=state.get("selected_service"),
+        datetime_preference=state.get("datetime_preference"),
+        available_slots=state.get("available_slots"),
+        availability_checked=state.get("availability_checked")
     )
 
     try:
@@ -813,10 +865,85 @@ async def delegate_to_deyy_node(
 
         context_summary = "\n".join(context_parts) if len(context_parts) > 1 else ""
 
+        # Instrucciones específicas según el current_step de StateMachine
+        step_instructions = ""
+        current_step = state.get("current_step", "reception")
+
+        if current_step == "info_collector":
+            step_instructions = """
+
+INSTRUCCIONES PARA ESTE PASO (INFO COLLECTOR):
+Ya tienes servicio, fecha y hora (ajustada). Ahora debes CONFIRMAR y AGENDAR.
+
+FLUJO ESTRICTO (no lo saltes):
+
+PASO A: Si NO tienes available_slots (no has consultado) → ejecuta consultar_disponibilidad(fecha=FECHA, servicio=SERVICIO) y ESPERA la respuesta. No digas nada al usuario.
+
+PASO B: Cuando recibas available_slots:
+  - Si el usuario ya especificó HORA y ESE SLOT EXACTO está disponible:
+      → Pregunta: "¿Confirmas agendar [servicio] para [fecha] a las [hora]?" (una sola pregunta)
+  - Si la hora especificada NO está disponible:
+      → Muestra 3-4 opciones y pregunta cuál prefiere
+  - Si el usuario NO especificó hora:
+      → Muestra 3-4 opciones y pregunta cuál prefiere
+
+PASO C: Cuando el usuario responda:
+  - Si dice "sí", "si", "ok", "confirmo", "confirmado", "sí por favor" → INMEDIATAMENTE ejecuta agendar_cita(fecha="ISO_con_hora", servicio=SERVICIO, nombre=patient_name)
+      → NO generes NINGÚN mensaje de texto. No digas "Voy a agendar...". Solo ejecuta la herramienta y espera su resultado.
+  - Si el usuario elige una hora de la lista → actualiza el estado con esa hora y vuelve al PASO B (para confirmar ese slot)
+  - Si el usuario quiere otra fecha → vuelve al PASO A con nueva fecha
+
+⚠️ REGLA CRÍTICA CONTRA BUCLE:
+Después de preguntar "¿Confirmas...?", cuando el usuario diga que SÍ, NO vuelvas a preguntar "¿Confirmas...?" ni muestres la lista otra vez.
+Eso sería un bucle. En su lugar, EJECUTA agendar_cita INMEDIATAMENTE.
+
+Ejemplo:
+1. Tú: "¿Confirmas consulta para el lunes 6 a las 10:00?"
+2. Usuario: "sí"
+3. Tú: [ejecutas agendar_cita directamente, sin generar texto]
+4. Recibes ToolMessage → se muestra al usuario
+
+Si sigues este flujo, el bucle se rompe.
+"""
+        elif current_step == "scheduler":
+            step_instructions = """
+
+INSTRUCCIONES PARA ESTE PASO (SCHEDULER):
+Tu objetivo: agendar la cita después de confirmación.
+
+FLUJO OBLIGATORIO:
+
+1. Si NO tienes available_slots → ejecuta consultar_disponibilidad(fecha=FECHA, servicio=SERVICIO) y espera. No hables al usuario.
+
+2. Con available_slots en mano:
+   - Usuario especificó HORA y está disponible → pregunta "¿Confirmas [servicio] para [fecha] a las [hora]?" (solo eso)
+   - Hora no disponible o no especificó → muestra 3-4 opciones y pregunta "¿Cuál prefieres?"
+
+3. Respuesta del usuario:
+   - Si confirma ("sí", "si", "ok", "confirmo", "confirmado") → INMEDIATAMENTE ejecuta agendar_cita(fecha=ISO, servicio=SERVICIO, nombre=patient_name)
+        → NO generes texto. Solo ejecuta la herramienta.
+   - Si elige hora → guarda y vuelve al paso 2 (confirmación)
+   - Si quiere cambiar fecha → consulta nueva fecha (paso 1)
+
+⚠️ REGLA ANTI-BUCLE (IMPORTANTE):
+Si ya preguntaste "¿Confirmas...?" y el usuario respondió afirmativamente, NO vuelvas a preguntar.
+Eso causa un bucle infinito. La acción correcta es ejecutar agendar_cita inmediatamente.
+
+Ejemplo correcto:
+- Tú: "¿Confirmas consulta para el lunes 6 a las 10:00?"
+- Usuario: "sí"
+- Tú: [ejecutas agendar_cita sin generar texto]
+
+Ejemplo INCORRECTO (bucle):
+- Tú: "¿Confirmas...?"
+- Usuario: "sí"
+- Tú: "Perfecto, confirming..." (ERROR: debiste ejecutar agendar_cita)
+"""
+
         # Combinar con system prompt base de DeyyAgent
         base_prompt = DeyyAgent.DEFAULT_SYSTEM_PROMPT
-        if context_summary:
-            system_prompt = f"{base_prompt}\n\n{context_summary}\n\nUtiliza esta información para responder de forma precisa y natural."
+        if context_summary or step_instructions:
+            system_prompt = f"{base_prompt}\n\n=== CONTEXTO DEL ESTADO ===\n{context_summary if context_summary else 'Sin datos adicionales'}\n{step_instructions}\n\nUtiliza esta información para responder de forma precisa y natural."
         else:
             system_prompt = base_prompt
 
@@ -932,7 +1059,7 @@ def build_arcadium_graph(
     workflow.add_node("save_state", save_wrapper)
     workflow.add_node("delegate", delegate_wrapper)
 
-    # Edges: agent → save_state → delegate → END
+    # Edges: agent  ->  save_state  ->  delegate  ->  END
     workflow.set_entry_point("agent")
     workflow.add_edge("agent", "save_state")
     workflow.add_edge("save_state", "delegate")

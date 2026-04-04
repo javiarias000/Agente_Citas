@@ -412,6 +412,12 @@ async def save_context_node(
     messages = state.get("messages", [])
     initial_count = state.get("initial_message_count", 0)
 
+    # Verificar si debemos guardar en memoria (controlado por Arcadium delegation)
+    save_to_memory = state.get("save_to_memory", True)
+    if not save_to_memory:
+        logger.debug("Skipping save to store (save_to_memory=False)", session_id=session_id)
+        return state
+
     # Solo guardar mensajes NUEVOS agregados durante este turno
     new_messages = messages[initial_count:] if initial_count < len(messages) else []
 
@@ -427,6 +433,9 @@ async def save_context_node(
         initial_count=initial_count,
         new_messages_count=len([m for m in new_messages if isinstance(m, (HumanMessage, AIMessage))])
     )
+
+    # ACTUALIZAR initial_message_count para evitar duplicación en el próximo turno
+    state["initial_message_count"] = len(messages)
 
     return state
 

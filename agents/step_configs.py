@@ -5,11 +5,11 @@ Configuración de prompts y herramientas por estado (step).
 Cada estado tiene su propio prompt, conjunto de herramientas, y requisitos.
 """
 
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+
 from langchain_core.prompts import ChatPromptTemplate
 
 from agents.support_state import SupportStep
-
 
 # ============================================
 # PROMPTS
@@ -66,13 +66,20 @@ CRITICAL RULES:
    - Example: if today is 2026-04-04 (Friday) and user says "Friday at 3pm", that means TODAY (2026-04-04) if time is in the future, OR next Friday (2026-04-11) if time already passed
    - Always produce a future date/time (>= current datetime)
    - Business hours: Monday-Friday 9:00-18:00 only. Do NOT schedule on weekends.
-3. ⚠️ NEVER call record_datetime_pref UNLESS the user EXPLICITLY mentions a date or time
-4. ⚠️ NEVER guess, invent, or assume a date. Wait for the user to provide it.
-5. ⚠️ Call ONLY ONE tool per turn, unless the user provides BOTH service and date in the SAME message.
-6. DO NOT respond with text. ONLY use tool calls.
-7. The system will auto-transition to SCHEDULER once both service and date are recorded
+3. WEEKEND HANDLING: IF datetime_preference is set (not "no definida") AND that date falls on a weekend (Saturday=5 or Sunday=6), THEN:
+   a) Calculate the next Monday at the same time.
+   b) IMMEDIATELY CALL record_datetime_pref(fecha="YYYY-MM-DDTHH:MM") with the adjusted Monday date.
+   c) This will update the state with the corrected date.
+   Example: if datetime_preference = "2026-04-05T10:00" (Sunday) → call record_datetime_pref(fecha="2026-04-06T10:00")
+4. ⚠️ NEVER call record_datetime_pref UNLESS the user EXPLICITLY mentions a date or time
+5. ⚠️ NEVER guess, invent, or assume a date. Wait for the user to provide it.
+6. ⚠️ Call ONLY ONE tool per turn, unless the user provides BOTH service and date in the SAME message.
+7. ⚠️ **DO NOT respond with text messages to the user.** ONLY use tool calls. The system will handle responses after each turn.
+8. The system will auto-transition to SCHEDULER once both service and date are recorded
 
 IMPORTANT: The fecha must be in ISO format (e.g., "2026-04-11T15:00") and must be in the future, on a weekday (Mon-Fri).
+
+Fluent conversation in Spanish. Be friendly but professional.
 """
 
 SCHEDULER_PROMPT = """Eres Deyy, asistente de gestión de citas dentales.
@@ -142,19 +149,20 @@ STEP_CONFIGS: Dict[SupportStep, Dict[str, Any]] = {
             "consultar": "scheduler",
             "cancelar": "resolution",
             "reagendar": "resolution",
-            "otro": "reception"
-        }
+            "otro": "reception",
+        },
     },
-
     "info_collector": {
         "name": "Recolección de Información",
         "description": "Recopilar datos: servicio, fecha",
         "prompt": ChatPromptTemplate.from_template(INFO_COLLECTOR_PROMPT),
         "tools": [],  # Se llenará
-        "requires": ["selected_service", "datetime_preference"],  # Necesita servicio y fecha para transitar
-        "can_transition_to": ["scheduler", "reception"]
+        "requires": [
+            "selected_service",
+            "datetime_preference",
+        ],  # Necesita servicio y fecha para transitar
+        "can_transition_to": ["scheduler", "reception"],
     },
-
     "scheduler": {
         "name": "Coordinación de Agenda",
         "description": "Consultar disponibilidad y agendar",
@@ -162,23 +170,23 @@ STEP_CONFIGS: Dict[SupportStep, Dict[str, Any]] = {
         "tools": [],  # Se llenará
         "requires": ["selected_service"],  # Necesita al menos el servicio
         "can_transition_to": ["resolution", "info_collector"],
-        "auto_transition_on": ["appointment_id"]  # Si agendar_cita() pone esto
+        "auto_transition_on": ["appointment_id"],  # Si agendar_cita() pone esto
     },
-
     "resolution": {
         "name": "Resolución",
         "description": "Gestión posterior",
         "prompt": ChatPromptTemplate.from_template(RESOLUTION_PROMPT),
         "tools": [],  # Se llenará
         "requires": [],  # Sin requisitos estrictos
-        "can_transition_to": ["info_collector", "reception"]
-    }
+        "can_transition_to": ["info_collector", "reception"],
+    },
 }
 
 
 # ============================================
 # FUNCIONES DE AYUDA
 # ============================================
+
 
 def get_config_for_step(step: SupportStep) -> Dict[str, Any]:
     """Devuelve la configuración completa para un estado."""
@@ -243,16 +251,15 @@ def initialize_step_tools():
     tools_by_name = {tool.name: tool for tool in STATE_MACHINE_TOOLS}
 
     # Recepción: SOLO classify_intent (forzar clasificación first)
-    STEP_CONFIGS["reception"]["tools"] = [
-        tools_by_name["classify_intent"]
-    ]
+    STEP_CONFIGS["reception"]["tools"] = [tools_by_name["classify_intent"]]
 
-    # Info Collector: NO incluimos record_service_selection porque lo manejamos via fallback determinista
+    # Info Collector: herramientas para recopilar datos básicos
     STEP_CONFIGS["info_collector"]["tools"] = [
+        tools_by_name["record_service_selection"],
         tools_by_name["record_datetime_pref"],
         tools_by_name["transition_to"],
         tools_by_name["go_back_to"],
-        tools_by_name["consultar_disponibilidad"]  # Por si quiere consultar antes
+        tools_by_name["consultar_disponibilidad"],  # Por si quiere consultar antes
     ]
 
     # Scheduler
@@ -261,7 +268,7 @@ def initialize_step_tools():
         tools_by_name["agendar_cita"],
         tools_by_name["record_appointment"],
         tools_by_name["go_back_to"],
-        tools_by_name["transition_to"]
+        tools_by_name["transition_to"],
     ]
 
     # Resolution
@@ -270,10 +277,9 @@ def initialize_step_tools():
         tools_by_name["cancelar_cita"],
         tools_by_name["reagendar_cita"],
         tools_by_name["go_back_to"],
-        tools_by_name["transition_to"]
+        tools_by_name["transition_to"],
     ]
 
 
 # NOTA: Se debe llamar a initialize_step_tools() explícitamente
 # después de importar todos los módulos. Lo hace StateMachineAgent.initialize()
-

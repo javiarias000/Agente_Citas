@@ -3,6 +3,7 @@ Compatibilidad para LangChain versiones 0.1.x y 0.2.x
 Centraliza imports que cambiaron entre versiones.
 """
 
+import json
 from typing import Any, Dict, List, Sequence
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.prompts import ChatPromptTemplate
@@ -60,14 +61,22 @@ except ImportError:
             else:
                 tool_name = getattr(action, "tool", "")
                 tool_input = getattr(action, "tool_input", {})
+            # Asegurar que tool_input es dict
+            if not isinstance(tool_input, dict):
+                tool_input = {}
             # Generar ID único para el tool call
             call_id = "call_" + str(hash(str(tool_name) + str(tool_input)))[:8]
+            # Convertir tool_input a JSON válido
+            try:
+                arguments_json = json.dumps(tool_input)
+            except Exception:
+                arguments_json = "{}"
             messages.append({"role": "assistant", "content": None, "tool_calls": [{
                 "id": call_id,
                 "type": "function",
                 "function": {
                     "name": tool_name,
-                    "arguments": str(tool_input)
+                    "arguments": arguments_json
                 }
             }]})
             messages.append({"role": "tool", "content": str(observation), "tool_call_id": call_id})
@@ -76,13 +85,27 @@ except ImportError:
 try:
     from langchain.agents.output_parsers.openai_tools import OpenAIToolsAgentOutputParser
 except ImportError:
-    # Parser simple que extrae la respuesta final
+    # Implementación alternativa que preserva AIMessage con tool_calls
+    from langchain_core.messages import AIMessage
+
     class OpenAIToolsAgentOutputParser:
+        """Parser que devuelve AIMessage preservando tool_calls y content"""
         def __call__(self, response):
-            # En versión simple, solo devolvemos el texto
-            if hasattr(response, 'content'):
-                return response.content
-            return str(response)
+            # Si ya es AIMessage, devolverlo directamente
+            if isinstance(response, AIMessage):
+                return response
+            # Si es ChatGeneration u objeto con .message
+            if hasattr(response, 'message'):
+                msg = response.message
+                if isinstance(msg, AIMessage):
+                    return msg
+                else:
+                    return AIMessage(content=str(msg))
+            # Si es string, crear AIMessage
+            if isinstance(response, str):
+                return AIMessage(content=response)
+            # Otro caso: convertir a string
+            return AIMessage(content=str(response))
 
 
 def create_openai_tools_agent(

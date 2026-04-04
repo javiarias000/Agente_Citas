@@ -667,7 +667,17 @@ class ArcadiumAPI:
                     cache_hit=message_data["sender"] in self._agents,
                     cache_size=len(self._agents)
                 )
-                result = await agent.process_message(message_data["message"])
+                # Extraer variables de contexto (fechas calculadas) si están presentes
+                context_vars = payload.get("context_vars", {})
+
+                # Log de contexto si está presente
+                if context_vars:
+                    logger.debug("Contexto recibido", context_keys=list(context_vars.keys()))
+
+                result = await agent.process_message(
+                    message_data["message"],
+                    context_vars=context_vars
+                )
 
                 # Actualizar mensaje con resultado
                 inbound_msg.processed = True
@@ -914,9 +924,9 @@ class ArcadiumAPI:
 
                 # Elegir tipo de agente basado en feature flag
                 if self.settings.ENABLE_STATE_MACHINE:
-                    # Usar StateMachineAgent (nuevo)
-                    from agents.state_machine_agent import StateMachineAgent
-                    agent = StateMachineAgent(
+                    # Usar RouterAgent (nueva arquitectura de agentes especializados)
+                    from agents.router_agent import RouterAgent
+                    agent = RouterAgent(
                         session_id=session_id,
                         store=self.store,
                         project_id=project_id,
@@ -925,12 +935,12 @@ class ArcadiumAPI:
                         verbose=self.settings.AGENT_VERBOSE
                     )
                     logger.info(
-                        "StateMachineAgent creado y cacheado",
+                        "RouterAgent (specialized) creado y cacheado",
                         cache_key=cache_key,
                         total_agents=len(self._agents)
                     )
                 else:
-                    # Usar DeyyAgent legacy
+                    # Usar DeyyAgent legacy (monolítico)
                     from agents.deyy_agent import DeyyAgent
                     agent = DeyyAgent(
                         session_id=session_id,

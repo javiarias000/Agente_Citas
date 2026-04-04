@@ -26,11 +26,12 @@ class BaseMemory(ABC):
     """Interfaz abstracta para backends de memoria"""
 
     @abstractmethod
-    async def get_history(self, session_id: str, limit: Optional[int] = None) -> List[BaseMessage]:
+    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None, limit: Optional[int] = None) -> List[BaseMessage]:
         """Obtiene historial de mensajes para una sesión.
 
         Args:
             session_id: ID de sesión
+            project_id: ID del proyecto (para filtrado multi-tenant). Opcional.
             limit: Número máximo de mensajes a devolver (más recientes primero). None = sin límite.
 
         Returns:
@@ -180,10 +181,10 @@ class PostgreSQLMemory(BaseMemory):
             self._backend = _get_postgres_storage()()
             await self._backend.initialize()
 
-    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None) -> List[BaseMessage]:
+    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None, limit: Optional[int] = None) -> List[BaseMessage]:
         """Obtiene historial desde PostgreSQL"""
         await self.initialize()
-        return await self._backend.get_history(session_id, project_id=project_id)
+        return await self._backend.get_history(session_id, project_id=project_id, limit=limit)
 
     async def add_message(self, session_id: str, message: BaseMessage, project_id: Optional[uuid.UUID] = None) -> None:
         """Añade mensaje a PostgreSQL"""
@@ -243,11 +244,11 @@ class MemoryManager:
 
         self._initialized = True
 
-    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None) -> List[BaseMessage]:
+    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None, limit: Optional[int] = None) -> List[BaseMessage]:
         """Obtiene historial de conversación"""
         if not self._initialized:
             await self.initialize()
-        return await self._backend.get_history(session_id, project_id)
+        return await self._backend.get_history(session_id, project_id, limit=limit)
 
     async def add_message(
         self,
