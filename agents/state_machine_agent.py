@@ -14,7 +14,12 @@ Características:
 from typing import Any, Dict, List, Optional
 import uuid
 import structlog
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, time
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # For Python < 3.9
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
@@ -40,8 +45,147 @@ from agents.step_configs import (
 )
 from agents.tools_state_machine import STATE_MACHINE_TOOLS
 from utils.phone_utils import normalize_phone
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 logger = structlog.get_logger("agent.state_machine")
+
+
+# ============================================
+# UTILIDADES: EXTRACCIÓN DETERMINISTA DE FECHAS
+# ============================================
+
+def extract_datetime_from_message(
+    message: str,
+    timezone: str = "America/Guayaquil"
+) -> Dict[str, Any]:
+    """
+    Extrae fecha y hora de un mensaje en español de forma determinística.
+
+    Detecta:
+    - Fechas relativas: "hoy", "mañana", "lunes", "martes", etc.
+    - Horas: "10", "10:30", "10am", "10 pm", "10 de la mañana", "10 de la tarde"
+    - Combina fecha + hora
+
+    Retorna un diccionario con variables pre-calculadas:
+    - fecha_legible: "domingo, 5 de abril de 2026"
+    - fecha_hoy: "2026-04-04"
+    - manana_fecha: "2026-04-05"
+    - manana_dia: "lunes"
+    - hora_actual: "05:16"
+    - extracted_date: fecha ISO detectada (si hay)
+    - extracted_time: hora detectada (si hay)
+    - extracted_datetime: fecha-hora ISO combinada (si ambas)
+
+    Args:
+        message: Mensaje del usuario
+        timezone: Zona horaria (default America/Guayaquil)
+
+    Returns:
+        Dict con variables de fecha/hora
+    """
+    tz = ZoneInfo(timezone)
+    now = datetime.now(tz)
+
+    # Variables base
+    # Construir fecha legible en español (independiente de locale)
+    dias_semana_es = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"]
+    meses_es = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+                "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+    dia_nombre = dias_semana_es[now.weekday()]
+    mes_nombre = meses_es[now.month - 1]
+    fecha_legible = f"{dia_nombre}, {now.day} de {mes_nombre} de {now.year}"
+
+    result = {
+        "fecha_legible": fecha_legible,
+        "fecha_hoy": now.strftime("%Y-%m-%d"),
+        "hora_actual": now.strftime("%H:%M"),
+        "today_date": now.date(),
+        "now_datetime": now,
+    }
+
+    # Calcular mañana (usando misma lógica de nombres en español)
+    tomorrow = now + timedelta(days=1)
+    result["manana_fecha"] = tomorrow.strftime("%Y-%m-%d")
+    result["manana_dia"] = dias_semana_es[tomorrow.weekday()]
+    result["tomorrow_date"] = tomorrow.date()
+
+    # Calcular días de la semana
+    dias_semana = {
+        'domingo': 6, 'lunes': 0, 'martes': 1, 'miercoles': 2, 'miércoles': 2,
+        'jueves': 3, 'viernes': 4, 'sábado': 5, 'sabado': 5
+    }
+
+    message_lower = message.lower().strip()
+
+    # ── DETECTAR FECHA ──
+    extracted_date = None
+    extracted_time = None
+
+    # 1. Buscar "mañana"
+    if "mañana" in message_lower or "manana" in message_lower:
+        extracted_date = tomorrow.date()
+    # 2. Buscar "hoy"
+    elif "hoy" in message_lower:
+        extracted_date = now.date()
+    # 3. Buscar día de la semana
+    else:
+        for dia, weekday in dias_semana.items():
+            if dia in message_lower:
+                # Calcular fecha para ese día
+                days_ahead = weekday - now.weekday()
+                if days_ahead <= 0:  # Ya pasado esta semana
+                    days_ahead += 7
+                extracted_date = (now + timedelta(days=days_ahead)).date()
+                break
+
+    # ── DETECTAR HORA ──
+    # Patrones de hora:
+    # - "10" o "10:" seguido de dígitos
+    # - "10am", "10pm"
+    # - "10 de la mañana", "10 de la tarde", "10 de la noche"
+
+    import re
+
+    # Patrón 1: número de 1-2 dígitos seguido de opcional :MM y modifiers
+    hora_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|de la mañana|de la tarde|de la noche)?', message_lower)
+    if hora_match:
+        hora = int(hora_match.group(1))
+        minutos = int(hora_match.group(2)) if hora_match.group(2) else 0
+        modifier = (hora_match.group(3) or "").lower()
+
+        # Convertir a 24h
+        if modifier in ['pm', 'de la tarde', 'de la noche'] and hora < 12:
+            hora += 12
+        elif modifier in ['am', 'de la mañana'] and hora == 12:
+            hora = 0
+
+        extracted_time = time(hour=hora, minute=minutos)
+    else:
+        # Sin hora, asumir hora actual? No, mejor no asumir
+        extracted_time = None
+
+    # ── COMBINAR FECHA Y HORA ──
+    extracted_datetime = None
+    if extracted_date and extracted_time:
+        extracted_datetime = datetime.combine(extracted_date, extracted_time).replace(tzinfo=tz)
+        result["extracted_date"] = extracted_date.strftime("%Y-%m-%d")
+        result["extracted_time"] = extracted_time.strftime("%H:%M")
+        result["extracted_datetime"] = extracted_datetime.isoformat()
+    elif extracted_date:
+        result["extracted_date"] = extracted_date.strftime("%Y-%m-%d")
+    elif extracted_time:
+        result["extracted_time"] = extracted_time.strftime("%H:%M")
+
+    # Log de lo extraído
+    logger.debug(
+        "Fecha/hora extraída",
+        extracted_date=result.get("extracted_date"),
+        extracted_time=result.get("extracted_time"),
+        extracted_datetime=result.get("extracted_datetime")
+    )
+
+    return result
 
 
 # ============================================
@@ -67,6 +211,8 @@ class StateMachineAgent:
         max_iterations: Optional[int] = None,
         verbose: bool = False
     ):
+        with open('/tmp/sm_init.log', 'a') as f:
+            f.write(f"STATE_MACHINE_INIT: session_id={session_id}, llm_model={llm_model}, project_config={project_config}\n")
         self.session_id = session_id
         self.store = store
         self.memory_manager = store.memory_manager  # Backward compatibility (opcional)
@@ -82,7 +228,15 @@ class StateMachineAgent:
         else:
             from core.config import get_settings
             agent_settings = get_settings()
-        self.llm_model = llm_model or (project_config.agent_name if project_config else agent_settings.OPENAI_MODEL)
+        with open('/tmp/state_machine_debug.txt', 'a') as f:
+            f.write(f"DEBUG: llm_model={llm_model}, agent_settings.OPENAI_MODEL={getattr(agent_settings, 'OPENAI_MODEL', 'MISSING')}\n")
+        logger.info(
+            "Configurando LLM",
+            llm_model_param=llm_model,
+            agent_settings_model=getattr(agent_settings, 'OPENAI_MODEL', 'NO ATTR'),
+            using_model=llm_model or agent_settings.OPENAI_MODEL
+        )
+        self.llm_model = llm_model or agent_settings.OPENAI_MODEL
         self.llm_temperature = llm_temperature if llm_temperature is not None else (
             project_config.temperature if project_config else agent_settings.OPENAI_TEMPERATURE
         )
@@ -203,12 +357,21 @@ class StateMachineAgent:
         self._initialized = True
         logger.info("StateMachineAgent inicializado con StateGraph", session_id=self.session_id)
 
-    async def process_message(self, message: str) -> Dict[str, Any]:
+    def _extract_phone_from_session(self, session_id: str) -> str:
+        """Extrae el número de teléfono normalizado del session_id."""
+        return normalize_phone(session_id)
+
+    async def process_message(
+        self,
+        message: str,
+        context_vars: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Procesa un mensaje del usuario con state machine usando StateGraph.
 
         Args:
             message: Mensaje del usuario
+            context_vars: Variables de contexto (fechas calculadas, etc.)
 
         Returns:
             Dict con:
@@ -235,15 +398,22 @@ class StateMachineAgent:
                 project_token = set_current_project(self.project_id, self.project_config)
 
             # 2. Cargar historial y estado de SupportState desde store
-            history = await self.store.get_history(self.session_id)
+            # Limit to last 10 messages for performance (context window)
+            history = await self.store.get_history(self.session_id, limit=10)
             agent_state = await self.store.get_agent_state(self.session_id, project_id=self.project_id)
 
-            # 3. Construir ArcadiumState completo
+            # 3. Extraer variables de contexto automáticamente si no se proporcionaron
+            if context_vars is None:
+                context_vars = extract_datetime_from_message(message)
+                logger.debug("Contexto extraído automáticamente", context_vars=context_vars)
+
+            # 4. Construir ArcadiumState completo
             if agent_state:
                 # Merge: start from agent_state
                 arcadium_state = create_initial_arcadium_state(
                     phone_number=phone,
-                    project_id=self.project_id
+                    project_id=self.project_id,
+                    context_vars=context_vars
                 )
                 # Merge agent_state fields
                 for key, value in agent_state.items():
@@ -253,16 +423,19 @@ class StateMachineAgent:
                 # Estado nuevo
                 arcadium_state = create_initial_arcadium_state(
                     phone_number=phone,
-                    project_id=self.project_id
+                    project_id=self.project_id,
+                    context_vars=context_vars
                 )
 
-            # Añadir historial
-            arcadium_state["messages"] = history
+            # Añadir historial (copy to avoid mutating store's internal list)
+            arcadium_state["messages"] = list(history)
+            # Marcar cuántos mensajes ya estaban guardados (para evitar duplicados en save)
+            arcadium_state["initial_message_count"] = len(history)
 
             # Incrementar turnos
             arcadium_state["conversation_turns"] = arcadium_state.get("conversation_turns", 0) + 1
 
-            # 4. Añadir mensaje del usuario
+            # 5. Añadir mensaje del usuario
             arcadium_state["messages"].append(HumanMessage(content=message))
 
             # 5. Invocar StateGraph

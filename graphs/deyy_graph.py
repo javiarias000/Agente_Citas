@@ -96,8 +96,8 @@ async def load_initial_context(
         Estado con historial cargado
     """
     session_id = state["phone_number"]
-    # Cargar solo últimos 50 mensajes para ventana de contexto
-    history = await store.get_history(session_id, limit=50)
+    # Cargar solo últimos 10 mensajes para ventana de contexto
+    history = await store.get_history(session_id, limit=10)
 
     logger.debug(
         "Context loaded",
