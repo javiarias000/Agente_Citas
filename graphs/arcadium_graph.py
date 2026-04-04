@@ -589,7 +589,7 @@ async def save_state_node(
     Nodo: Guarda el estado actual en Store.
 
     Separa el estado en:
-    - Mensajes (ya gestionados por checkpoint)
+    - Mensajes (ya gestionados por checkpoint + también guardados en store para acceso cruzado)
     - SupportState (agent_state namespace)
     - User profile updates (si hay cambios)
 
@@ -626,7 +626,189 @@ async def save_state_node(
     # Guardar estado de SupportState
     await store.save_agent_state(session_id, support_state, project_id=project_id)
 
+    # Guardar mensajes en store (para que DeyyAgent pueda ver el historial)
+    messages = state.get("messages", [])
+    for msg in messages:
+        # Solo guardar mensajes de usuario y AI (ToolMessages pueden ser reconstructeds)
+        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+        if isinstance(msg, (HumanMessage, AIMessage)):
+            try:
+                # Store espera objeto BaseMessage
+                await store.add_message(
+                    session_id=session_id,
+                    message=msg
+                )
+            except Exception as e:
+                logger.warning("Failed to save message to store", error=str(e), content_preview=msg.content[:50])
+
     # TODO: Guardar perfil de usuario si hay updates (determinar desde herramientas)
+
+    return state
+
+
+async def delegate_to_deyy_node(
+    state: ArcadiumState,
+    store: ArcadiumStore
+) -> ArcadiumState:
+    """
+    Nodo de delegación: Invoca a DeyyAgent para generar la respuesta final.
+
+    StateMachineAgent recolectó el contexto (intención, servicio, fecha, etc.).
+    Este nodo construye un prompt estructurado y delega a DeyyAgent para que
+    ejecute las herramientas de negocio y genere la respuesta natural.
+
+    Args:
+        state: Estado actual con contexto completo
+        store: Store para persistencia
+
+    Returns:
+        Estado con la respuesta generada por DeyyAgent añadida a messages
+    """
+    from agents.deyy_agent import DeyyAgent
+    from core.config import get_settings
+    from datetime import datetime
+
+    settings = get_settings()
+    session_id = state["phone_number"]
+    project_id = state.get("project_id")
+
+    logger.info(
+        "Delegating to DeyyAgent",
+        session_id=session_id,
+        current_step=state.get("current_step"),
+        intent=state.get("intent"),
+        selected_service=state.get("selected_service")
+    )
+
+    try:
+        # 1. Crear DeyyAgent (usando phone_number real como session_id)
+        deyy_agent = DeyyAgent(
+            session_id=session_id,
+            store=store,
+            project_id=project_id,
+            llm_model=settings.OPENAI_MODEL,
+            llm_temperature=settings.OPENAI_TEMPERATURE,
+            max_iterations=2,  # Permitir hasta 2 iteraciones (tool calls + respuesta)
+            verbose=False
+        )
+
+        # 2. Inicializar agente si no está
+        if not deyy_agent._initialized:
+            await deyy_agent.initialize()
+
+        # 3. Extraer el último mensaje del usuario del estado
+        user_message = ""
+        for msg in reversed(state.get("messages", [])):
+            from langchain_core.messages import HumanMessage
+            if isinstance(msg, HumanMessage):
+                user_message = msg.content
+                break
+
+        if not user_message:
+            logger.warning("No user message found for delegation", session_id=session_id)
+            # Añadir mensaje de sistema indicando que no se puede procesar
+            from langchain_core.messages import AIMessage
+            state["messages"].append(AIMessage(content="No pude entender tu mensaje. ¿Podrías reformular?"))
+            return state
+
+        # 4. Construir system prompt con contexto del StateMachine
+        context_parts = ["INFORMACIÓN RECOPILADA DEL ESTADO:"]
+        if state.get("intent"):
+            context_parts.append(f"- Intención: {state['intent']}")
+        if state.get("selected_service"):
+            context_parts.append(f"- Servicio: {state['selected_service']}")
+        if state.get("service_duration"):
+            context_parts.append(f"- Duración: {state['service_duration']} minutos")
+        if state.get("datetime_preference"):
+            context_parts.append(f"- Fecha/hora preferida: {state['datetime_preference']}")
+        if state.get("patient_name"):
+            context_parts.append(f"- Paciente: {state['patient_name']}")
+        if state.get("available_slots"):
+            slots = state['available_slots'][:5]
+            context_parts.append(f"- Slots disponibles: {', '.join(slots)}")
+        if state.get("appointment_id"):
+            context_parts.append(f"- Cita agendada (ID): {state['appointment_id']}")
+        if state.get("google_event_link"):
+            context_parts.append(f"- Enlace Calendar: {state['google_event_link']}")
+
+        context_summary = "\n".join(context_parts) if len(context_parts) > 1 else ""
+
+        # Combinar con system prompt base de DeyyAgent
+        base_prompt = DeyyAgent.DEFAULT_SYSTEM_PROMPT
+        if context_summary:
+            system_prompt = f"{base_prompt}\n\n{context_summary}\n\nUtiliza esta información para responder de forma precisa y natural."
+        else:
+            system_prompt = base_prompt
+
+        # 5. Crear DeyyAgent con system prompt enriquecido
+        deyy_agent = DeyyAgent(
+            session_id=session_id,
+            store=store,
+            project_id=project_id,
+            system_prompt=system_prompt,
+            llm_model=settings.OPENAI_MODEL,
+            llm_temperature=settings.OPENAI_TEMPERATURE,
+            max_iterations=2,
+            verbose=False
+        )
+
+        # 6. Inicializar agente si no lo está
+        if not deyy_agent._initialized:
+            await deyy_agent.initialize()
+
+        # 7. Extraer mensaje del usuario (ya añadido al estado anteriormente)
+        user_message = ""
+        for msg in reversed(state.get("messages", [])):
+            from langchain_core.messages import HumanMessage
+            if isinstance(msg, HumanMessage):
+                user_message = msg.content
+                break
+
+        if not user_message:
+            logger.warning("No user message found for delegation", session_id=session_id)
+            state["messages"].append(AIMessage(content="No pude entender tu mensaje. ¿Podrías reformular?"))
+            return state
+
+        # 8. Invocar DeyyAgent
+        logger.debug(
+            "Calling DeyyAgent",
+            session_id=session_id,
+            user_message=user_message[:100],
+            has_context=bool(context_summary)
+        )
+
+        result = await deyy_agent.process_message(
+            user_message,
+            save_to_memory=False,
+            check_toggle=False
+        )
+
+        # 6. Extraer respuesta y tool calls
+        response = result.get("response", "")
+        tool_calls = result.get("tool_calls", [])
+
+        # 7. Añadir respuesta al estado
+        if response:
+            from langchain_core.messages import AIMessage
+            state["messages"].append(AIMessage(content=response))
+            logger.info(
+                "DeyyAgent response added",
+                session_id=session_id,
+                response_len=len(response),
+                tool_calls_count=len(tool_calls)
+            )
+        else:
+            logger.warning("DeyyAgent returned empty response", session_id=session_id)
+            state["messages"].append(AIMessage(content="No pude generar una respuesta. ¿Podrías intentar de nuevo?"))
+
+        # 8. Guardar tool calls en estado para logging/auditoría
+        if tool_calls:
+            state["delegated_tool_calls"] = tool_calls
+
+    except Exception as e:
+        logger.error("Error in delegate_to_deyy_node", session_id=session_id, error=str(e), exc_info=True)
+        from langchain_core.messages import AIMessage
+        state["messages"].append(AIMessage(content=f"Error interno: {str(e)}"))
 
     return state
 
@@ -663,14 +845,19 @@ def build_arcadium_graph(
     async def save_wrapper(state: ArcadiumState) -> ArcadiumState:
         return await save_state_node(state, store)
 
+    async def delegate_wrapper(state: ArcadiumState) -> ArcadiumState:
+        return await delegate_to_deyy_node(state, store)
+
     # Añadir nodos
     workflow.add_node("agent", agent_wrapper)
     workflow.add_node("save_state", save_wrapper)
+    workflow.add_node("delegate", delegate_wrapper)
 
-    # Edges
+    # Edges: agent → save_state → delegate → END
     workflow.set_entry_point("agent")
     workflow.add_edge("agent", "save_state")
-    workflow.add_edge("save_state", END)
+    workflow.add_edge("save_state", "delegate")
+    workflow.add_edge("delegate", END)
 
     # Compilar con checkpointer
     if checkpointer:

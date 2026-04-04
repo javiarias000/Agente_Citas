@@ -295,8 +295,6 @@ class StateMachineAgent:
 
                     # Extraer tool calls de la historia (intermediate steps)
                     # En StateGraph, las tools se ejecutan y los resultados se añaden a messages
-                    # Necesitamos parsear para extraer tool_calls
-                    # Por ahora, simple: extraer desde el historial
                     for i, msg in enumerate(result["messages"]):
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
                             for tc in msg.tool_calls:
@@ -305,6 +303,10 @@ class StateMachineAgent:
                                     "input": tc.get("args", {}),
                                     "output": ""  # No disponible fácilmente
                                 })
+
+                # También incluir tool_calls delegados a DeyyAgent (si existen)
+                if result.get("delegated_tool_calls"):
+                    tool_calls.extend(result["delegated_tool_calls"])
 
             # 7. Guardar estado actualizado (store ya lo hizo en nodo save_state, pero por si acaso)
             # El nodo save_state ya guardó, pero podemos forzar save adicional si es necesario
