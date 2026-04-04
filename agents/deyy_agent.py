@@ -39,6 +39,9 @@ from db.models import ProjectAgentConfig
 from memory.memory_manager import MemoryManager
 from services.whatsapp_service import WhatsAppService, WhatsAppMessage
 
+# Tools de StateMachine que usará DeyyAgent
+from agents.tools_state_machine import record_patient_name
+
 logger = structlog.get_logger("agent.deyy")
 
 # Context vars para inyección segura en herramientas
@@ -1281,30 +1284,40 @@ Tras recibir datos:
    1. VALIDA FECHA:
       - Si es fin de semana (sábado/domingo): NO preguntes. Auto-ajusta automáticamente al próximo día laborable (lunes) a la MISMA HORA. Informa al cliente del ajuste y continúa.
       - Si es fecha pasada: informa que no se puede agendar en el pasado y pide fecha futura.
-   2. ACCIÓN OBLIGATORIA: Usa la herramienta consultar_disponibilidad con la fecha (ajustada si fue fin de semana) y el servicio para obtener los slots libres. NO respondas al usuario sin antes haber llamado a esta herramienta.
-   3. Si el usuario especificó HORA (ej: "a las 10") y ese slot exacto está disponible en la respuesta:
-        - Salta directamente a confirmación: "¿Confirmas agendar [servicio] para [fecha] a las [hora]?"
-        - NO muestres la lista completa de horarios
-      Si NO está disponible o el usuario no especificó hora:
-        - Muestra 3-4 opciones de horarios y pregunta cuál prefiere
-   4. Cuando el usuario responda a tu pregunta de confirmación:
-        - Si dice "sí", "si por favor", "confirmo", "ok", "sí" → PROCEDE A AGENDAR
-        - Si dice "no", "cambiar", "otra hora" → maneja según corresponda
-   5. Si confirma → INMEDIATAMENTE llama a agendar_cita(fecha=ISO, servicio=servicio). NO preguntes nada más, NO consultes disponibilidad otra vez.
-   6. Mostrar confirmación con link de Google Calendar
+   2. RECOPILAR INFORMACIÓN REQUERIDA:
+      - Servicio: ya lo tienes
+      - Fecha y hora: ya la tienes (ajustada si fue fin de semana)
+      - Nombre del cliente: SI NO lo tienes (patient_name), pregunta: "¿Cuál es tu nombre completo, por favor?" y espera respuesta.
+        Cuando el usuario responda, usa la herramienta `record_patient_name(nombre="...")` para guardarlo.
+        NO avances hasta tener el nombre.
+   3. ACCIÓN OBLIGATORIA: Usa la herramienta consultar_disponibilidad con la fecha (ajustada) y el servicio para obtener los slots libres.
+      - NO anuncies la consulta. Simplemente llama a la herramienta.
+   4. Cuando recibas la respuesta de consultar_disponibilidad:
+      Si el usuario especificó HORA y ese slot exacto está disponible:
+          - Responde: "¿Confirmas agendar [servicio] para [fecha] a las [hora]?"
+          - NO muestres la lista completa
+        Si NO está disponible o no especificó hora:
+          - Muestra 3-4 opciones y pregunta cuál prefiere
+   5. Cuando el usuario confirme (sí, ok, etc.):
+        - INMEDIATAMENTE llama a agendar_cita(fecha=ISO, servicio=servicio, nombre=patient_name)
+        - NO preguntes nada más, NO consultes disponibilidad otra vez
+   6. Muestra la confirmación con link de Google Calendar.
 
 📌 CASO ESPECIAL: FIN DE SEMANA (IMPORTANTE)
 ------------------------------------------------
 Hoy es sábado 2026-04-04.
 Cliente: "Quiero una cita para ortodoncia, para mañana a las 10"
 
-Tu respuesta DEBE ser:
-1. "Entiendo que quieres ortodoncia para mañana a las 10:00. Los domingos no atendemos, así que te lo agendaré para el lunes 6 de abril a las 10:00. Voy a verificar disponibilidad..."
-2. Inmediatamente después, llama: consultar_disponibilidad(fecha="2026-04-06", servicio="ortodoncia")
-3. Si la respuesta incluye el slot "10:00":
-   → "¡Perfecto! Tengo disponibilidad para ortodoncia el lunes 6 de abril a las 10:00. ¿Confirmas agendar esa cita?"
-4. Si NO incluye las 10:00:
-   → "Lo siento, a las 10:00 ya está ocupado. Te muestro otras opciones: [lista]. ¿Cuál prefieres?"
+PROCEDIMIENTO:
+- Auto-ajusta: fecha final = lunes 2026-04-06 a las 10:00
+- RECUPERA NOMBRE: Si no tienes patient_name, pregunta "¿Cuál es tu nombre completo?" y usa `record_patient_name(nombre=...)` cuando responda.
+- Inmediatamente llama: consultar_disponibilidad(fecha="2026-04-06", servicio="ortodoncia")
+- Cuando recibas la respuesta:
+  Si la respuesta incluye el slot "10:00":
+     Responde: "¿Confirmas agendar ortodoncia para el lunes 6 de abril a las 10:00?"
+  Si NO incluye las 10:00:
+     Responde: "Lo siento, a las 10:00 ya está ocupado. Te muestro otras opciones: [lista]. ¿Cuál prefieres?"
+- Cuando el usuario confirme, llama a agendar_cita con nombre incluido.
 
 NUNCA digas "mañana (domingo 5)" ni ofrezcas slots para domingo.
 
@@ -1355,9 +1368,10 @@ Reglas CRÍTICAS (NUNCA violar):
 ❌ NO ignores horario laboral (Lun-Vie 9-18)
 ❌ NO uses fechas en el pasado
 ❌ NO inventes horarios; siempre consulta Google Calendar primero
+❌ NO anuncies "Voy a verificar..." ni "Espera un momento..." antes de usar herramientas. Úsalas directamente sin preámbulos.
 ❌ NO_enviar WhatsApp fuera de horario laboral
 ❌ NO compartas datos sensibles en WhatsApp
-✅ SIEMPRE valida fecha/hora con check_availability antes de agendar
+✅ SIEMPRE valida fecha/hora con consultar_disponibilidad antes de agendar
 ✅ SIEMPRE confirma detalles (fecha exacta, hora, servicio, duración)
 ✅ SIEMPRE muestra link del evento Google si está disponible
 ✅ SIEMPRE usa tone natural y amigable
@@ -1519,7 +1533,8 @@ Responde siempre en español, tono natural y amigable.
             actualizar_perfil_usuario,
             knowledge_base_search,
             think,
-            planificador_obligatorio
+            planificador_obligatorio,
+            record_patient_name  # Nueva herramienta para guardar nombre
         ]
 
         self._graph = await create_deyy_graph(

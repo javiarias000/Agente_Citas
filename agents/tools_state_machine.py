@@ -292,6 +292,9 @@ def record_datetime_pref(
                 }
             )
 
+        # Guardar fecha original para logging
+        original_fecha_str = fecha
+
         # Si es fin de semana (sábado=5, domingo=6), mover al próximo lunes
         if dt.weekday() >= 5:
             days_to_monday = (7 - dt.weekday()) % 7  # 5(Sat)->2, 6(Sun)->1
@@ -499,7 +502,8 @@ async def agendar_cita(
     runtime: Any,
     fecha: Optional[str] = None,
     servicio: Optional[str] = None,
-    notas: Optional[str] = None
+    notas: Optional[str] = None,
+    nombre: Optional[str] = None
 ) -> Command:
     """
     Agenda la cita en Google Calendar + DB.
@@ -515,6 +519,7 @@ async def agendar_cita(
         fecha: Fecha en formato ISO (opcional, usa selected_slot o datetime_preference del state)
         servicio: Tipo de servicio (opcional, usa selected_service del state)
         notas: Notas adicionales (opcional)
+        nombre: Nombre completo del cliente (opcional, usa patient_name del state si no se provee)
 
     Returns:
         Command con appointment_id y transita a 'resolution' si éxito.
@@ -524,6 +529,10 @@ async def agendar_cita(
     fecha = fecha or state.get("selected_slot") or state.get("datetime_preference")
     servicio = servicio or state.get("selected_service")
     phone = get_current_phone()  # Debería venir de contextvars
+
+    # Obtener nombre del cliente: prioridad argumento > state > phone (fallback)
+    if not nombre:
+        nombre = state.get("patient_name") or f"Cliente {phone}"
 
     # LOG para depurar
     logger.info("AGENDAR_CITA invoked", fecha=fecha, servicio=servicio, phone=phone, current_step=state.get("current_step"))
@@ -549,6 +558,11 @@ async def agendar_cita(
         dt = datetime.fromisoformat(fecha)
         logger.info("AGENDAR_CITA parsed date", dt=dt.isoformat(), weekday=dt.weekday())
 
+        # Preparar metadata con nombre del cliente
+        metadata = {}
+        if nombre:
+            metadata["client_name"] = nombre
+
         # Crear cita
         project_id = state.get("project_id")  # Puede ser None para modo legacy
         success, message, appointment = await appointment_service.create_appointment(
@@ -557,7 +571,8 @@ async def agendar_cita(
             appointment_datetime=dt,
             service_type=servicio,
             project_id=project_id,
-            notes=notas
+            notes=notas,
+            metadata=metadata
         )
 
         if success and appointment:
@@ -947,6 +962,38 @@ def _get_appointment_service_from_runtime(runtime: Any) -> AppointmentService:
             return AppointmentService(settings=settings)
 
 
+@tool
+async def record_patient_name(
+    runtime: Any,
+    nombre: str = Field(description="Nombre completo del cliente")
+) -> Command:
+    """
+    Guarda el nombre del paciente en el estado de la conversación.
+
+    Usar cuando el cliente proporcione su nombre para registrarlo en la cita.
+
+    Args:
+        nombre: Nombre completo del cliente
+
+    Returns:
+        Command con actualización de patient_name en el estado.
+    """
+    state = runtime.state
+
+    logger.info(
+        "Guardando nombre del paciente",
+        nombre=nombre,
+        phone=state.get("phone_number")
+    )
+
+    # Guardar en estado (StateMachine)
+    return Command(
+        update={
+            "patient_name": nombre
+        }
+    )
+
+
 # ============================================
 # LISTA DE TODAS LAS TOOLS
 # ============================================
@@ -962,5 +1009,7 @@ STATE_MACHINE_TOOLS = [
     agendar_cita,
     obtener_citas_cliente,
     cancelar_cita,
+    reagendar_cita,
+    record_patient_name,  # Nueva herramienta
     reagendar_cita
 ]
