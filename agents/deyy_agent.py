@@ -1282,9 +1282,13 @@ Tras recibir datos:
    1. VALIDA FECHA:
       - Si es fin de semana (sábado/domingo): NO preguntes. Auto-ajusta automáticamente al próximo día laborable (lunes) a la MISMA HORA. Informa al cliente del ajuste y continúa.
       - Si es fecha pasada: informa que no se puede agendar en el pasado y pide fecha futura.
-   2. Usa consultar_disponibilidad para confirmar slot libre en la fecha (ajustada si fue fin de semana)
-   3. Si hay slots disponibles: muestra 3-4 opciones (horas) y pregunta cuál prefiere el cliente
-   4. Una vez elegida hora, pregunta "¿Confirmas agendar [fecha] [hora] para [servicio]?"
+   2. Usa consultar_disponibilidad para esa fecha (ajustada si fue fin de semana)
+   3. Si el usuario especificó HORA (ej: "a las 10") y ese slot exacto está disponible:
+        - Salta directamente a confirmación: "¿Confirmas agendar [servicio] para [fecha] a las [hora]?"
+        - NO muestres la lista completa de horarios
+      Si NO está disponible o el usuario no especificó hora:
+        - Muestra 3-4 opciones de horarios y pregunta cuál prefiere
+   4. Una vez elegida/o confirmada la hora, pregunta "¿Confirmas agendar [fecha] [hora] para [servicio]?" (si no lo hiciste en paso 3)
    5. Si confirma → agendar_cita
    6. Mostrar confirmación con link de Google Calendar
 
@@ -1654,11 +1658,13 @@ Responde siempre en español, tono natural y amigable.
                     "phone_number": phone,
                     "project_id": self.project_id,
                     "context_vars": context_vars,
+                    "save_to_memory": save_to_memory,  # Flag para controlar guardado en store
                 }
                 if not skip_user_message_addition:
                     state_params["current_user_message"] = message
                 # Si skip_user_message_addition=True, asumimos que el mensaje ya está en el store
                 state = DeyyState(**state_params)
+                print(f"[DEBUG] skip_user_message_addition={skip_user_message_addition}, state has current_user_message: {'current_user_message' in state}")
 
                 # 4. Invocar StateGraph
                 config = {"configurable": {"thread_id": self.session_id}}
