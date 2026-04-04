@@ -6,11 +6,15 @@ Uses contextvars para inyección segura de phone_number en tools
 """
 
 from typing import Any, Dict, List, Optional, Annotated, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import contextvars
 import structlog
 from uuid import UUID
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # For Python < 3.9
 
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage
@@ -61,11 +65,12 @@ def reset_phone(token: contextvars.Token) -> None:
     _phone_context.reset(token)
 
 
-def set_current_project(project_id: uuid.UUID, project_config: Optional[ProjectAgentConfig] = None) -> contextvars.Token:
+def set_current_project(project_id: uuid.UUID, project_config: Optional[ProjectAgentConfig] = None):
     """Set current project in context"""
     _project_context.set(project_id)
     _project_config_context.set(project_config)
-    return _project_context.token  # return token for resetting
+    # Return a simple marker (not a real token) since we don't need精细 reset
+    return True  # Just indicate that context was set
 
 
 def get_current_project_id() -> Optional[uuid.UUID]:
@@ -78,10 +83,10 @@ def get_current_project_config() -> Optional[ProjectAgentConfig]:
     return _project_config_context.get()
 
 
-def reset_project(token: contextvars.Token) -> None:
+def reset_project() -> None:
     """Reset project context"""
-    _project_context.reset(token)
-    _project_config_context.reset(token)
+    _project_context.set(None)
+    _project_config_context.set(None)
 
 
 # ============================================
@@ -1179,6 +1184,28 @@ Gestión de Calendario:
 - Citas de 30, 45, 60 o 90 min según servicio
 - Todos los horarios en timezone America/Guayaquil
 
+INFORMACIÓN IMPORTANTE DE FECHAS:
+- Fecha actual: {current_date}
+- Hora actual: {current_time}
+- Timezone: America/Guayaquil (UTC-5)
+- Días laborables: Lunes-Viernes (9:00-18:00)
+- Fines de semana (sábado, domingo): NO hay atención
+
+Reglas de fechas:
+- NUNCA uses fechas en el pasado
+- NUNCA inventes horarios; siempre consulta Google Calendar primero
+- SIEMPRE calcula fechas relativas (mañana, próximo viernes) basándote en {current_date}
+- Para "mañana": suma 1 día a {current_date}
+- Para "esta semana": considera días desde hoy hasta el viernes
+- Para "próxima semana": suma 7 días a {current_date}
+- CRÍTICO: Si la fecha propuesta es sábado o domingo, NO consultes disponabilidad ni ofrezcas citas. Informa al cliente que no atendemos fines de semana y sugiere la próxima fecha laborable (lunes o viernes).
+
+Ejemplo de cálculo correcto:
+- Si hoy es {current_date}, "mañana" es {tomorrow_date}
+- Si hoy es {current_date}, "el próximo lunes" calculado correctamente
+
+CONSULTA DISPONIBILIDAD ANTES DE AGENDAR.
+
 Tus capacidades (herramientas):
 
 📅 GESTIÓN DE CITAS:
@@ -1248,12 +1275,16 @@ Cliente: "Quiero agendar una cita"
 Tú: Pregunta fecha, hora y servicio específico
    - Si no sabe servicio: explica opciones (consulta, limpieza, empaste, ortodoncia, etc.)
    - Si no sabe fecha/hora: consulta_disponibilidad para sugerir
+
 Tras recibir datos:
-   1. Validar fecha/hora (futura, laboral)
-   2. consultar_disponibilidad para confirmar slot libre
-   3. Si disponible: preguntar "¿Confirmas agendar [fecha] [hora] para [servicio]?"
-   4. Si confirma → agendar_cita
-   5. Mostrar confirmación con link de Google Calendar
+   1. VALIDA FECHA:
+      - Si es fin de semana (sábado/domingo): informa que no atendemos y sugiere próxima fecha laborable (lunes o viernes). NO continúes.
+      - Si es fecha pasada: informa que no se puede agendar en el pasado y pide fecha futura.
+   2. Usa consultar_disponibilidad para confirmar slot libre
+   3. Si hay slots disponibles: muestra 3-4 opciones (horas) y pregunta cuál prefiere el cliente
+   4. Una vez elegida hora, pregunta "¿Confirmas agendar [fecha] [hora] para [servicio]?"
+   5. Si confirma → agendar_cita
+   6. Mostrar confirmación con link de Google Calendar
 
 🟢 CONSULTAR DISPONIBILIDAD:
 Cliente: "¿Hay libre el 25/12/2025?" o "¿Cuándo hay para una limpieza?"
@@ -1360,7 +1391,7 @@ Responde siempre en español, tono natural y amigable.
 
         # Configuración desde project_config o settings
         settings = get_settings()
-        self.llm_model = llm_model or (project_config.agent_name if project_config else settings.OPENAI_MODEL)
+        self.llm_model = llm_model or settings.OPENAI_MODEL
         self.llm_temperature = llm_temperature if llm_temperature is not None else (project_config.temperature if project_config else settings.OPENAI_TEMPERATURE)
         self.max_iterations = max_iterations or (project_config.max_iterations if project_config else settings.AGENT_MAX_ITERATIONS)
 
@@ -1374,7 +1405,19 @@ Responde siempre en español, tono natural y amigable.
             )
             self.system_prompt = system_prompt or formatted_prompt
         else:
-            self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
+            # Formatear DEFAULT_SYSTEM_PROMPT con fecha/hora actual en zona America/Guayaquil
+            tz = ZoneInfo("America/Guayaquil")
+            now = datetime.now(tz)
+            current_date = now.strftime("%Y-%m-%d")
+            current_time = now.strftime("%H:%M")
+            tomorrow_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+            formatted_prompt = self.DEFAULT_SYSTEM_PROMPT.format(
+                current_date=current_date,
+                current_time=current_time,
+                tomorrow_date=tomorrow_date
+            )
+            self.system_prompt = system_prompt or formatted_prompt
 
         self.verbose = verbose
 
@@ -1536,10 +1579,20 @@ Responde siempre en español, tono natural y amigable.
         self,
         message: str,
         save_to_memory: bool = True,
-        check_toggle: bool = True
+        check_toggle: bool = True,
+        context_vars: Optional[Dict[str, Any]] = None,
+        skip_user_message_addition: bool = False
     ) -> Dict[str, Any]:
         """
         Procesa un mensaje del usuario usando StateGraph.
+
+        Args:
+            message: Mensaje del usuario
+            save_to_memory: Si se guarda en memoria
+            check_toggle: Si verifica toggle habilitado
+            context_vars: Variables de contexto (fechas calculadas, etc.)
+            skip_user_message_addition: Si True, no agrega el mensaje del usuario al estado
+                (asume que ya está en el historial del store). Usado por StateMachineAgent.
         """
         start_time = datetime.utcnow()
 
@@ -1592,39 +1645,53 @@ Responde siempre en español, tono natural y amigable.
                     phone=phone
                 )
 
-                # 2. Crear estado DeyyState
+                # 2. Crear estado DeyyState (messages vacío; load_initial_context lo cargará desde store)
                 from graphs.deyy_graph import DeyyState
-                state = DeyyState(
-                    messages=history,
-                    phone_number=phone,
-                    project_id=self.project_id
-                )
-
-                # 3. Añadir mensaje del usuario
-                state["messages"].append(HumanMessage(content=message))
+                state_params = {
+                    "messages": [],  # será cargado por load_initial_context desde store
+                    "phone_number": phone,
+                    "project_id": self.project_id,
+                    "context_vars": context_vars,
+                }
+                if not skip_user_message_addition:
+                    state_params["current_user_message"] = message
+                # Si skip_user_message_addition=True, asumimos que el mensaje ya está en el store
+                state = DeyyState(**state_params)
 
                 # 4. Invocar StateGraph
                 config = {"configurable": {"thread_id": self.session_id}}
                 result = await self._graph.ainvoke(state, config=config)
 
-                # 5. Extraer respuesta (último mensaje AI)
+                # 5. Extraer respuesta (último mensaje AI) y tool calls
                 response = ""
+                tool_calls = []
                 if result.get("messages"):
                     ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
                     if ai_messages:
                         response = ai_messages[-1].content
+                        # Extraer todos los tool_calls de todos los AIMessages (excepto el último si ya tiene respuesta? todos)
+                        for msg in ai_messages:
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    tool_calls.append({
+                                        "name": tc.get("name") or tc.get("function", {}).get("name"),
+                                        "args": tc.get("args") or tc.get("function", {}).get("arguments", {})
+                                    })
 
                 execution_time = (datetime.utcnow() - start_time).total_seconds()
 
                 logger.info(
                     "Mensaje procesado con StateGraph",
                     session_id=self.session_id,
-                    execution_time=execution_time
+                    execution_time=execution_time,
+                    response_len=len(response),
+                    tool_calls_count=len(tool_calls)
                 )
 
                 return {
                     "status": "success",
                     "response": response,
+                    "tool_calls": tool_calls,
                     "execution_time_seconds": execution_time,
                     "session_id": self.session_id
                 }
@@ -1634,7 +1701,7 @@ Responde siempre en español, tono natural y amigable.
                 reset_phone(token)
                 # Resetear contexto de proyecto
                 if project_token:
-                    reset_project(project_token)
+                    reset_project()
 
         except Exception as e:
             execution_time = (datetime.utcnow() - start_time).total_seconds()

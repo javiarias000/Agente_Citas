@@ -11,10 +11,14 @@ Este grafo implementa el flujo completo de agendamiento de citas usando:
 """
 
 from typing import Dict, Any, Literal, TypedDict, Annotated, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import structlog
 from contextvars import ContextVar
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # For Python < 3.9
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -78,13 +82,17 @@ class ArcadiumState(TypedDict):
     # Campos de resolución
     confirmation_sent: bool
     appointment_details: Optional[Dict[str, Any]]
+
+    # Variables de contexto externas (fechas calculadas, etc.)
+    context_vars: Optional[Dict[str, Any]]
     follow_up_needed: bool
 
 
 def create_initial_arcadium_state(
     phone_number: str,
     project_id: Optional[uuid.UUID] = None,
-    initial_step: SupportStep = "reception"
+    initial_step: SupportStep = "reception",
+    context_vars: Optional[Dict[str, Any]] = None
 ) -> ArcadiumState:
     """
     Crea estado inicial para una nueva conversación.
@@ -93,6 +101,7 @@ def create_initial_arcadium_state(
         phone_number: Número del usuario
         project_id: ID del proyecto (opcional)
         initial_step: Paso inicial del state machine
+        context_vars: Variables de contexto (fechas calculadas, etc.)
 
     Returns:
         ArcadiumState inicializado
@@ -121,6 +130,7 @@ def create_initial_arcadium_state(
         confirmation_sent=False,
         appointment_details=None,
         follow_up_needed=False,
+        context_vars=context_vars,
     )
 
 
@@ -156,7 +166,11 @@ async def load_conversation_context(
 
     # 1. Cargar historial
     history = await store.get_history(session_id)
-    state["messages"] = history
+    # Copy to avoid mutating store's internal list
+    state["messages"] = list(history)
+
+    # Marcar cuántos mensajes ya estaban en el store (para evitar duplicados en save)
+    state["initial_message_count"] = len(history)
 
     logger.debug(
         "History loaded",
@@ -237,8 +251,32 @@ async def agent_node(
         prompt_template = "Eres un asistente útil."
 
     # Construir prompt con variables de estado, tool_names y current_date
-    from datetime import date
-    current_date_str = date.today().strftime("%Y-%m-%d")
+    from datetime import date, datetime, timedelta
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("America/Guayaquil"))
+    current_date_str = now.strftime("%Y-%m-%d")
+    current_time_str = now.strftime("%H:%M")
+
+    # Calcular mañana
+    tomorrow = now + timedelta(days=1)
+    tomorrow_date_str = tomorrow.strftime("%Y-%m-%d")
+
+    # Día de la semana en español
+    dias_semana = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+    manana_dia = dias_semana[tomorrow.weekday()]
+
+    # Guardar context_vars para delegación a DeyyAgent (nombres en español, esperados por DeyyGraph)
+    state["context_vars"] = {
+        "fecha_hoy": current_date_str,
+        "hora_actual": current_time_str,
+        "manana_fecha": tomorrow_date_str,
+        "manana_dia": manana_dia,
+        "fecha_legible": now.strftime("%A, %d de %B de %Y")
+    }
 
     prompt_vars = {
         "intent": state.get("intent", "no clasificado"),
@@ -252,11 +290,47 @@ async def agent_node(
         "google_event_link": state.get("google_event_link", "no disponible"),
         "patient_name": state.get("patient_name", "no definido"),
         "tool_names": ", ".join([t.name for t in tools]),
-        "current_date": current_date_str
+        "current_date": current_date_str,
+        "current_time": current_time_str,
+        "tomorrow_date": tomorrow_date_str,
     }
+
+    # Añadir variables de contexto (fechas calculadas) si están disponibles
+    context_vars = state.get("context_vars", {})
+    if context_vars:
+        # Mapear variables de contexto a prompt_vars
+        if "fecha_legible" in context_vars:
+            prompt_vars["fecha_actual_legible"] = context_vars["fecha_legible"]
+        if "fecha_hoy" in context_vars:
+            prompt_vars["fecha_hoy"] = context_vars["fecha_hoy"]
+            # Sobrescribir current_date para que los templates existentes usen la fecha correcta
+            prompt_vars["current_date"] = context_vars["fecha_hoy"]
+        if "manana_fecha" in context_vars:
+            prompt_vars["fecha_manana"] = context_vars["manana_fecha"]
+        if "manana_dia" in context_vars:
+            prompt_vars["manana_dia"] = context_vars["manana_dia"]
+        if "hora_actual" in context_vars:
+            prompt_vars["hora_actual"] = context_vars["hora_actual"]
 
     if isinstance(prompt_template, str):
         system_prompt = prompt_template.format(**prompt_vars)
+
+        # Añadir bloque de fechas pre-calculadas si están disponibles
+        if context_vars:
+            fecha_block = "\n\n=== INFORMACIÓN DE FECHAS (USA ESTAS VARIABLES) ===\n"
+            if "fecha_legible" in context_vars:
+                fecha_block += f"Fecha actual: {context_vars['fecha_legible']}\n"
+            if "fecha_hoy" in context_vars:
+                fecha_block += f"Hoy (ISO): {context_vars['fecha_hoy']}\n"
+            if "manana_fecha" in context_vars:
+                fecha_block += f"Mañana (ISO): {context_vars['manana_fecha']}\n"
+            if "manana_dia" in context_vars:
+                fecha_block += f"Mañana (día): {context_vars['manana_dia']}\n"
+            if "hora_actual" in context_vars:
+                fecha_block += f"Hora actual: {context_vars['hora_actual']}\n"
+            fecha_block += "\nIMPORTANTE: Usa estas fechas directamente. No calcules fechas tú mismo."
+            system_prompt = system_prompt + fecha_block
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt),
             MessagesPlaceholder(variable_name="chat_history"),
@@ -264,7 +338,10 @@ async def agent_node(
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
     else:
+        # Si es un ChatPromptTemplate, añadir variables al partial
+        # Pero también añadir fechas info directamente en el system message si context_vars existe
         prompt = prompt_template.partial(**prompt_vars)
+        # NOTA: Para templates complejos, podríamos modificar el system message aquí también
 
     # Bind tools al LLM
     llm_with_tools = prompt | llm.bind_tools(tools)
@@ -628,9 +705,13 @@ async def save_state_node(
 
     # Guardar mensajes en store (para que DeyyAgent pueda ver el historial)
     messages = state.get("messages", [])
-    for msg in messages:
+    initial_count = state.get("initial_message_count", 0)
+
+    # Solo guardar mensajes NUEVOS agregados durante este turno
+    new_messages = messages[initial_count:] if initial_count < len(messages) else []
+
+    for msg in new_messages:
         # Solo guardar mensajes de usuario y AI (ToolMessages pueden ser reconstructeds)
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
         if isinstance(msg, (HumanMessage, AIMessage)):
             try:
                 # Store espera objeto BaseMessage
@@ -667,6 +748,7 @@ async def delegate_to_deyy_node(
     from agents.deyy_agent import DeyyAgent
     from core.config import get_settings
     from datetime import datetime
+    from langchain_core.messages import HumanMessage, AIMessage
 
     settings = get_settings()
     session_id = state["phone_number"]
@@ -699,7 +781,6 @@ async def delegate_to_deyy_node(
         # 3. Extraer el último mensaje del usuario del estado
         user_message = ""
         for msg in reversed(state.get("messages", [])):
-            from langchain_core.messages import HumanMessage
             if isinstance(msg, HumanMessage):
                 user_message = msg.content
                 break
@@ -707,7 +788,6 @@ async def delegate_to_deyy_node(
         if not user_message:
             logger.warning("No user message found for delegation", session_id=session_id)
             # Añadir mensaje de sistema indicando que no se puede procesar
-            from langchain_core.messages import AIMessage
             state["messages"].append(AIMessage(content="No pude entender tu mensaje. ¿Podrías reformular?"))
             return state
 
@@ -759,7 +839,6 @@ async def delegate_to_deyy_node(
         # 7. Extraer mensaje del usuario (ya añadido al estado anteriormente)
         user_message = ""
         for msg in reversed(state.get("messages", [])):
-            from langchain_core.messages import HumanMessage
             if isinstance(msg, HumanMessage):
                 user_message = msg.content
                 break
@@ -769,7 +848,7 @@ async def delegate_to_deyy_node(
             state["messages"].append(AIMessage(content="No pude entender tu mensaje. ¿Podrías reformular?"))
             return state
 
-        # 8. Invocar DeyyAgent
+        # 8. Invocar DeyyAgent (pasar context_vars para fechas calculadas)
         logger.debug(
             "Calling DeyyAgent",
             session_id=session_id,
@@ -780,7 +859,9 @@ async def delegate_to_deyy_node(
         result = await deyy_agent.process_message(
             user_message,
             save_to_memory=False,
-            check_toggle=False
+            check_toggle=False,
+            context_vars=state.get("context_vars", {}),
+            skip_user_message_addition=True  # Ya está en store
         )
 
         # 6. Extraer respuesta y tool calls
@@ -789,7 +870,6 @@ async def delegate_to_deyy_node(
 
         # 7. Añadir respuesta al estado
         if response:
-            from langchain_core.messages import AIMessage
             state["messages"].append(AIMessage(content=response))
             logger.info(
                 "DeyyAgent response added",
@@ -807,7 +887,6 @@ async def delegate_to_deyy_node(
 
     except Exception as e:
         logger.error("Error in delegate_to_deyy_node", session_id=session_id, error=str(e), exc_info=True)
-        from langchain_core.messages import AIMessage
         state["messages"].append(AIMessage(content=f"Error interno: {str(e)}"))
 
     return state
