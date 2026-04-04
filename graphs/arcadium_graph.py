@@ -164,8 +164,8 @@ async def load_conversation_context(
 
     logger.info("Loading conversation context", phone=phone, session_id=session_id)
 
-    # 1. Cargar historial
-    history = await store.get_history(session_id)
+    # 1. Cargar historial (limitado a últimos 50 mensajes para evitar exceso de contexto)
+    history = await store.get_history(session_id, limit=50)
     # Copy to avoid mutating store's internal list
     state["messages"] = list(history)
 

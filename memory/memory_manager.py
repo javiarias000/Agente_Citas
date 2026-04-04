@@ -26,8 +26,16 @@ class BaseMemory(ABC):
     """Interfaz abstracta para backends de memoria"""
 
     @abstractmethod
-    async def get_history(self, session_id: str) -> List[BaseMessage]:
-        """Obtiene historial de mensajes para una sesión"""
+    async def get_history(self, session_id: str, limit: Optional[int] = None) -> List[BaseMessage]:
+        """Obtiene historial de mensajes para una sesión.
+
+        Args:
+            session_id: ID de sesión
+            limit: Número máximo de mensajes a devolver (más recientes primero). None = sin límite.
+
+        Returns:
+            Lista de mensajes en orden cronológico
+        """
         pass
 
     @abstractmethod
@@ -67,12 +75,15 @@ class InMemoryStorage(BaseMemory):
         self._profiles: Dict[tuple, Dict[str, Any]] = {}
         logger.info("InMemoryStorage inicializado")
 
-    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None) -> List[BaseMessage]:
+    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None, limit: Optional[int] = None) -> List[BaseMessage]:
         """Obtiene historial, creando vacío si no existe"""
         if session_id not in self._sessions:
             self._sessions[session_id] = []
             self._timestamps[session_id] = datetime.now(timezone.utc)
-        return self._sessions[session_id]
+        history = self._sessions[session_id]
+        if limit is not None:
+            return history[-limit:]  # Últimos 'limit' mensajes
+        return history
 
     async def add_message(self, session_id: str, message: BaseMessage, project_id: Optional[uuid.UUID] = None) -> None:
         """Añade mensaje y actualiza timestamp"""

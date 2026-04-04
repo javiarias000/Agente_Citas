@@ -101,44 +101,49 @@ class ArcadiumStore:
     # HISTORY NAMESPACE
     # ========================================
 
-    async def get_history(self, session_id: str) -> List[BaseMessage]:
+    async def get_history(self, session_id: str, limit: Optional[int] = None) -> List[BaseMessage]:
         """
         Obtiene historial de mensajes para una sesión.
 
         Args:
             session_id: ID de sesión (teléfono o UUID)
+            limit: Número máximo de mensajes a devolver (los más recientes). Si None, sin límite.
 
         Returns:
-            Lista de mensajes de LangChain en orden cronológico
+            Lista de mensajes de LangChain en orden cronológico (copia para evitar mutaciones)
         """
         # Usar namespace formal
         namespace = ("history", session_id)
         cache_key = ("messages", "full")  # key dummy para cache
 
-        # Check cache first
-        if namespace in self._cache and cache_key in self._cache[namespace]:
+        # Check cache first (solo si no hay límite, ya que el límite cambia el resultado)
+        if limit is None and namespace in self._cache and cache_key in self._cache[namespace]:
             value, cached_at = self._cache[namespace][cache_key]
             # Cache TTL: 5 minutos
             from datetime import timedelta
             if datetime.utcnow() - cached_at < timedelta(minutes=5):
                 self._get_logger().debug("History cache hit", session_id=session_id)
-                return value
+                # Return a copy to prevent mutation of cached list
+                return list(value)
 
         # Load from storage
-        history = await self.memory_manager.get_history(session_id)
+        history = await self.memory_manager.get_history(session_id, limit=limit)
+        # Make a copy to prevent mutation of the internal storage list
+        history_copy = list(history)
 
-        # Cache result
-        if namespace not in self._cache:
-            self._cache[namespace] = {}
-        from datetime import timedelta
-        self._cache[namespace][cache_key] = (history, datetime.utcnow())
+        # Cache result (store the copy) - solo cachear si no hay límite
+        if limit is None:
+            if namespace not in self._cache:
+                self._cache[namespace] = {}
+            from datetime import timedelta
+            self._cache[namespace][cache_key] = (history_copy, datetime.utcnow())
 
         self._get_logger().debug(
             "History loaded from storage",
             session_id=session_id,
-            count=len(history)
+            count=len(history_copy)
         )
-        return history
+        return history_copy
 
     async def add_message(self, session_id: str, message: BaseMessage) -> None:
         """

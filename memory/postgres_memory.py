@@ -34,16 +34,17 @@ class PostgresStorage:
         self._initialized = True
         logger.info("PostgreSQLMemory inicializado")
 
-    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None) -> List[BaseMessage]:
+    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None, limit: Optional[int] = None) -> List[BaseMessage]:
         """
         Obtiene historial de mensajes para una sesión.
 
         Args:
             session_id: Identificador de sesión (teléfono o UUID)
             project_id: ID del proyecto (para filtrado multi-tenant). Si se provee, filtra por project_id.
+            limit: Número máximo de mensajes a devolver (más recientes). None = sin límite.
 
         Returns:
-            Lista de mensajes en orden cronológico
+            Lista de mensajes en orden cronológica
         """
         if not self._initialized:
             await self.initialize()
@@ -62,6 +63,9 @@ class PostgresStorage:
                 stmt = stmt.where(LangchainMemory.session_id == session_id)
 
             stmt = stmt.order_by(LangchainMemory.created_at)
+
+            if limit is not None:
+                stmt = stmt.limit(limit)
 
             result = await session.execute(stmt)
             records = result.scalars().all()
