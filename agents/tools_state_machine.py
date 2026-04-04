@@ -964,7 +964,6 @@ def _get_appointment_service_from_runtime(runtime: Any) -> AppointmentService:
 
 @tool
 async def record_patient_name(
-    runtime: Any,
     nombre: str = Field(description="Nombre completo del cliente")
 ) -> Command:
     """
@@ -978,12 +977,18 @@ async def record_patient_name(
     Returns:
         Command con actualización de patient_name en el estado.
     """
-    state = runtime.state
+    # Obtener phone y project_id del contexto (como en deyy_agent)
+    try:
+        phone = get_current_phone()
+        project_id = get_current_project_id()
+    except ValueError:
+        phone = None
+        project_id = None
 
     logger.info(
         "Guardando nombre del paciente",
         nombre=nombre,
-        phone=state.get("phone_number")
+        phone=phone
     )
 
     # Guardar en estado (StateMachine)
