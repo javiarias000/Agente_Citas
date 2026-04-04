@@ -63,3 +63,22 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 def get_engine() -> Optional[AsyncEngine]:
     """Obtiene el engine global (para crear tablas, etc)"""
     return _engine
+
+
+async def create_all(engine: Optional[AsyncEngine] = None) -> None:
+    """
+    Crea todas las tablas en la base de datos.
+
+    Args:
+        engine: AsyncEngine a usar. Si None, usa el engine global.
+    """
+    from db.models import Base
+
+    eng = engine or get_engine()
+    if eng is None:
+        raise RuntimeError("No engine available. Call init_session_maker() first or pass engine.")
+
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    logger.info("All tables created successfully")

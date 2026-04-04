@@ -1,0 +1,10 @@
+{
+  "iterations": 15,
+  "total_time_sec": 16.28827366582118,
+  "throughput_msg_per_sec": 0.9209079063716584,
+  "latency_avg_ms": 1085.8849110547453,
+  "latency_p50_ms": 1010.3198089636862,
+  "latency_p95_ms": 1572.955978102982,
+  "latency_p99_ms": 1572.955978102982,
+  "timestamp": "2026-04-04T01:56:26.674515"
+}

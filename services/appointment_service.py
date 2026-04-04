@@ -71,6 +71,7 @@ class AppointmentService:
         phone_number: str,
         appointment_datetime: datetime,
         service_type: str,
+        project_id: Optional[uuid.UUID] = None,
         notes: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, str, Optional[AppointmentModel]]:
@@ -89,6 +90,7 @@ class AppointmentService:
             phone_number: Número de teléfono del cliente
             appointment_datetime: Fecha y hora de la cita
             service_type: Tipo de servicio (nombre oficial)
+            project_id: ID del proyecto (opcional, puede ser None para modo legacy)
             notes: Notas adicionales
             metadata: Metadatos adicionales
 
@@ -186,6 +188,7 @@ class AppointmentService:
             # PASO 4: CREAR CITA EN POSTGRESQL
             # ============================================
             appointment = AppointmentModel(
+                project_id=project_id,
                 phone_number=phone_number,
                 appointment_date=appointment_datetime,
                 service_type=service_type,

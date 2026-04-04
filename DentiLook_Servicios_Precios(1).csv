@@ -1,0 +1,42 @@
+categoria,servicio,descripcion,precio_desde,precio_hasta,unidad,observaciones
+Odontología General,Consulta inicial,Evaluación completa del estado bucal con radiografías diagnósticas y plan de tratamiento personalizado,20,20,por consulta,Primera vez. Incluye diagnóstico
+Odontología General,Consulta de control,Revisión de seguimiento para pacientes con tratamiento activo,0,0,por consulta,Gratis con tratamiento activo
+Odontología General,Limpieza dental profesional (profilaxis),Eliminación de placa bacteriana sarro y manchas. Incluye pulido y aplicación de flúor,35,60,por sesión,Según acumulación de sarro
+Odontología General,Empaste de resina (obturación),Restauración de dientes con caries usando resina compuesta del color del diente,45,80,por diente,Según número de caras
+Odontología General,Extracción simple,Extracción de piezas dentales con daño irreversible bajo anestesia local,40,60,por diente,Incluye anestesia
+Odontología General,Fluorización,Aplicación tópica de flúor para fortalecer el esmalte y prevenir caries,20,30,por sesión,Recomendado cada 6 meses
+Endodoncia,Endodoncia unirradicular (1 conducto),Tratamiento de conducto para incisivos y caninos. Elimina infección y preserva el diente,180,180,por diente,Incluye restauración temporal
+Endodoncia,Endodoncia birradicular (2 conductos),Tratamiento de conducto para premolares. Procedimiento en 1-2 sesiones,220,220,por diente,Incluye restauración temporal
+Endodoncia,Endodoncia multirradicular (3+ conductos),Tratamiento de conducto para molares. Requiere 2-3 sesiones según complejidad,280,280,por diente,Incluye restauración temporal
+Endodoncia,Retratamiento endodóntico,Para casos donde un tratamiento previo de conducto ha fallado o necesita revisión,250,350,por diente,Según complejidad
+Periodoncia,Tratamiento de gingivitis,Tratamiento de inflamación de encías en etapa inicial. Incluye limpieza profunda y medicación,80,150,por tratamiento,Según severidad
+Periodoncia,Tratamiento de periodontitis,Tratamiento especializado de enfermedad periodontal avanzada. Curetaje y alisado radicular,200,400,por cuadrante,Según extensión
+Periodoncia,Cirugía periodontal,Procedimientos quirúrgicos para casos avanzados de enfermedad de encías,400,800,por cirugía,Según complejidad
+Periodoncia,Mantenimiento periodontal,Limpiezas especializadas para pacientes con historial periodontal,50,80,por sesión,Cada 3 meses recomendado
+Ortodoncia,Ortodoncia metálica,Brackets metálicos de alta calidad para corrección de maloclusiones. Incluye controles mensuales,800,1200,por tratamiento completo,Incluye controles por 18-24 meses
+Ortodoncia,Ortodoncia cerámica (estética),Brackets de porcelana color diente menos visibles que los metálicos,1000,1500,por tratamiento completo,Incluye controles por 18-24 meses
+Ortodoncia,Ortodoncia lingual,Brackets en la cara interna de los dientes completamente invisible,2000,3000,por tratamiento completo,Incluye controles
+Ortodoncia,Alineadores transparentes (Invisalign),Sistema de alineadores removibles transparentes. Ideal para adultos y casos moderados,1500,3000,por tratamiento completo,Según número de alineadores necesarios
+Ortodoncia,Retenedores post-ortodoncia,Retenedores fijos y removibles para mantener resultados del tratamiento ortodóntico,100,200,por retenedor,Fijos o removibles
+Ortodoncia,Ortodoncia interceptiva niños,Tratamiento temprano en dentición mixta para guiar el crecimiento óseo,600,1000,por tratamiento,Para niños en dentición mixta
+Implantología,Implante dental unitario completo,Implante de titanio para reemplazar un diente perdido. Incluye corona sobre implante,800,1200,por implante,Implante + corona incluida
+Implantología,Implantes múltiples,Solución para múltiples dientes perdidos con planificación de guía quirúrgica digital,800,1200,por implante,Precio por implante individual
+Implantología,All-on-4 por arcada,Rehabilitación completa de arcada con 4 implantes. Solución definitiva para edéntulos totales,6000,9000,por arcada,Solución completa por arcada superior o inferior
+Implantología,Elevación de seno maxilar,Procedimiento previo al implante cuando no hay suficiente hueso en maxilar superior,800,1500,por procedimiento,Procedimiento previo necesario en algunos casos
+Implantología,Regeneración ósea guiada,Técnica para aumentar volumen óseo antes o durante colocación de implantes,600,1200,por procedimiento,Según cantidad de hueso necesario
+Estética Dental,Blanqueamiento dental en consultorio,Blanqueamiento profesional con luz LED en 1 sesión de 60-90 minutos. Resultados inmediatos,150,200,por sesión,1 sesión con resultados inmediatos
+Estética Dental,Blanqueamiento domiciliario,Kit personalizado con férulas y gel para usar en casa durante 2 semanas,80,120,por kit,Kit completo para 2 semanas de uso
+Estética Dental,Carilla de porcelana,Láminas ultrafinas de porcelana adheridas al frente de los dientes. Transformación estética completa,300,500,por unidad,Precio por carilla individual
+Estética Dental,Carilla de resina (composite),Alternativa económica a las carillas de porcelana. Realizadas en una sola sesión,80,150,por unidad,Realizadas en una sola sesión
+Estética Dental,Diseño de sonrisa digital,Planificación digital del resultado estético antes de iniciar el tratamiento,50,50,por diseño,Se descuenta del tratamiento final
+Estética Dental,Corona de porcelana,Fundas completas de porcelana para dientes muy destruidos o tratados con endodoncia,300,450,por unidad,Por diente
+Estética Dental,Incrustaciones inlays onlays,Restauraciones cerámicas de alta precisión para dientes posteriores,200,400,por unidad,Mayor durabilidad que resina
+Odontopediatría,Consulta pediátrica,Atención especializada para niños desde la erupción del primer diente,20,30,por consulta,Desde el primer diente de leche
+Odontopediatría,Sellantes de fosas y fisuras,Aplicación de sellantes preventivos en molares para evitar caries,25,35,por diente,Preventivo para niños
+Odontopediatría,Corona de acero,Restauración de molares temporales con daño extenso,80,120,por diente,Para dientes de leche muy dañados
+Odontopediatría,Pulpotomía (nervio temporal),Tratamiento de conducto para dientes de leche,80,120,por diente,Alternativa a extracción en dientes temporales
+Odontopediatría,Mantenedor de espacio,Dispositivo para conservar espacio del diente de leche hasta erupción del permanente,150,250,por mantenedor,Evita problemas de espacio futuros
+Cirugía Oral,Extracción de cordales (muelas del juicio),Extracción de terceros molares incluidos o semi-incluidos con sedación opcional,120,250,por diente,Según complejidad. Sedación opcional disponible
+Cirugía Oral,Frenectomía,Cirugía para corregir frenillo labial o lingual corto,150,250,por procedimiento,Labial o lingual
+Cirugía Oral,Quistectomía,Extirpación de quistes mandibulares o maxilares,400,800,por procedimiento,Según tamaño y ubicación
+Cirugía Oral,Apicectomía,Cirugía del ápice radicular como alternativa al retratamiento endodóntico,300,500,por diente,Cuando el retratamiento no es viable

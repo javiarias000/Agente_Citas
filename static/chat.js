@@ -91,12 +91,9 @@ class ArcadiumChat {
         this.addMessage(
           data.content,
           "assistant",
-          data.tool_calls,
+          null, // No tool_calls para frontend
           data.execution_time,
         );
-        break;
-      case "tools_used":
-        // Already handled in response, but could be separate
         break;
       case "error":
         this.hideTypingIndicator();
@@ -129,7 +126,7 @@ class ArcadiumChat {
     );
   }
 
-  addMessage(content, type, toolCalls = null, executionTime = null) {
+  addMessage(content, type, executionTime = null) {
     const messageDiv = document.createElement("div");
     messageDiv.className = `message ${type}`;
 
@@ -144,22 +141,6 @@ class ArcadiumChat {
     const text = document.createElement("div");
     text.textContent = content;
     contentDiv.appendChild(text);
-
-    // Tool calls (if any)
-    if (toolCalls && toolCalls.length > 0) {
-      const toolsDiv = document.createElement("div");
-      toolsDiv.className = "tools-used";
-      toolsDiv.innerHTML = "<h4>🔧 Herramientas usadas:</h4>";
-
-      toolCalls.forEach((tool) => {
-        const toolItem = document.createElement("div");
-        toolItem.className = "tool-item";
-        toolItem.textContent = `• ${tool.tool}: ${JSON.stringify(tool.input)}`;
-        toolsDiv.appendChild(toolItem);
-      });
-
-      contentDiv.appendChild(toolsDiv);
-    }
 
     // Timestamp
     const time = document.createElement("div");

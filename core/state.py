@@ -285,7 +285,11 @@ class StateManager:
         """Obtiene o crea valor usando factory"""
         value = await self.get(key)
         if value is None:
-            value = factory(**factory_kwargs)
+            # Soporte para factories sincrónicas y asincrónicas
+            if asyncio.iscoroutinefunction(factory):
+                value = await factory(**factory_kwargs)
+            else:
+                value = factory(**factory_kwargs)
             await self.set(key, value, ttl=ttl)
         return value
 

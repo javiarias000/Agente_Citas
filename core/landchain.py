@@ -38,10 +38,18 @@ class ChainResult:
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:
+        error_str = None
+        if self.error:
+            msg = str(self.error)
+            if msg:
+                error_str = msg
+            else:
+                # Si el mensaje está vacío, usar el nombre de la clase de la excepción
+                error_str = type(self.error).__name__
         return {
             "status": self.status.value,
             "data": self.data,
-            "error": str(self.error) if self.error else None,
+            "error": error_str,
             "metadata": self.metadata,
             "execution_time_ms": self.execution_time_ms,
             "retry_count": self.retry_count,
@@ -86,13 +94,11 @@ class ChainLink:
 
         while retry_count <= self.max_retries:
             try:
+                # Ejecutar función (soporta sync y async)
                 if self.timeout:
-                    result = await asyncio.wait_for(
-                        self.func(data, context),
-                        timeout=self.timeout
-                    )
+                    result = await self._execute_with_timeout(data, context, self.timeout)
                 else:
-                    result = await self.func(data, context)
+                    result = await self._execute_function(data, context)
 
                 execution_time = (time.time() - start_time) * 1000
 
@@ -131,6 +137,26 @@ class ChainLink:
                     retry_count=retry_count,
                     metadata={"unexpected_error": True}
                 )
+
+    async def _execute_function(self, data: Any, context: Dict[str, Any]) -> Any:
+        """Ejecuta la función del link, manejando sync y async"""
+        if asyncio.iscoroutinefunction(self.func):
+            return await self.func(data, context)
+        else:
+            # Función síncrona: ejecutar en executor
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: self.func(data, context))
+
+    async def _execute_with_timeout(self, data: Any, context: Dict[str, Any], timeout: float) -> Any:
+        """Ejecuta la función con timeout, manejando sync y async"""
+        if asyncio.iscoroutinefunction(self.func):
+            return await asyncio.wait_for(self.func(data, context), timeout=timeout)
+        else:
+            loop = asyncio.get_event_loop()
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: self.func(data, context)),
+                timeout=timeout
+            )
 
 
 class LandChain:
@@ -229,13 +255,17 @@ class LandChain:
                     self.logger.info(f"✓ Eslabón {link.name} completado en {result.execution_time_ms:.2f}ms")
                 else:
                     metrics["failures"] += 1
-                    chain_failed = True
+                    # Determinar si este fallo es crítico para el estado final
+                    # Es crítico si: no se permite continuar (continue_on_failure=False) O la cadena es estricta
+                    is_critical = not link.continue_on_failure or self.strict_mode
+                    if is_critical:
+                        chain_failed = True
 
                     # Rollback si está configurado
                     if link.rollback_on_failure and link.rollback_func:
                         try:
                             self.logger.warning(f"Ejecutando rollback para {link.name}")
-                            await link.rollback_func(current_data, self.context)
+                            await self._execute_rollback(link.rollback_func, current_data, self.context)
                         except Exception as e:
                             self.logger.error(f"Rollback falló: {e}")
 
@@ -286,6 +316,14 @@ class LandChain:
             self.logger.error(f"Error inesperado en cadena '{self.name}': {e}")
             self._metrics["failed_executions"] += 1
             raise ChainError(f"Error en cadena: {e}")
+
+    async def _execute_rollback(self, rollback_func: Callable, data: Any, context: Dict[str, Any]) -> Any:
+        """Ejecuta rollback, soportando funciones sync y async"""
+        if asyncio.iscoroutinefunction(rollback_func):
+            return await rollback_func(data, context)
+        else:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: rollback_func(data, context))
 
     def get_metrics(self) -> Dict[str, Any]:
         """Retorna métricas de la cadena"""

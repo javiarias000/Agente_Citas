@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Config - Arcadium Admin</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #f3f4f6;
+        height: 100vh;
+        display: flex;
+      }
+      .sidebar {
+        width: 260px;
+        background: #1f2937;
+        color: white;
+        padding: 20px;
+      }
+      .sidebar h1 {
+        font-size: 1.2rem;
+        margin-bottom: 30px;
+      }
+      .sidebar nav a {
+        display: block;
+        padding: 10px;
+        color: #9ca3af;
+        text-decoration: none;
+        border-radius: 6px;
+        margin-bottom: 5px;
+      }
+      .sidebar nav a:hover,
+      .sidebar nav a.active {
+        background: #374151;
+        color: white;
+      }
+      .main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .topbar {
+        background: white;
+        padding: 15px 20px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .content {
+        flex: 1;
+        padding: 20px;
+        overflow-y: auto;
+      }
+      .section {
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        margin-bottom: 20px;
+        padding: 20px;
+      }
+      .section h2 {
+        font-size: 1.1rem;
+        margin-bottom: 15px;
+        color: #374151;
+        border-bottom: 1px solid #e5e7eb;
+        padding-bottom: 10px;
+      }
+      .form-group {
+        margin-bottom: 15px;
+      }
+      label {
+        display: block;
+        margin-bottom: 6px;
+        font-weight: 500;
+        color: #374151;
+      }
+      input,
+      textarea,
+      select {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font-size: 0.9rem;
+      }
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+      .checkbox-group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .checkbox-group input {
+        width: auto;
+      }
+      .tools-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .tool-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: #f3f4f6;
+        padding: 6px 12px;
+        border-radius: 20px;
+        font-size: 0.875rem;
+      }
+      .btn {
+        padding: 10px 20px;
+        background: #667eea;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        margin-right: 10px;
+      }
+      .btn:hover {
+        background: #5a67d8;
+      }
+      .btn-success {
+        background: #10b981;
+      }
+      .btn-success:hover {
+        background: #059669;
+      }
+      .mapping-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 10px;
+      }
+      .mapping-table th,
+      .mapping-table td {
+        padding: 8px;
+        text-align: left;
+        border: 1px solid #e5e7eb;
+      }
+      .mapping-table th {
+        background: #f9fafb;
+        font-weight: 600;
+      }
+      .message {
+        padding: 10px 15px;
+        border-radius: 6px;
+        margin-bottom: 15px;
+      }
+      .message.success {
+        background: #d1fae5;
+        color: #065f46;
+      }
+      .message.error {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="sidebar">
+      <h1>⚙️ Admin Panel</h1>
+      <nav>
+        <a href="/admin/dashboard">📊 Dashboard</a>
+        <a href="/admin/projects">📁 Proyectos</a>
+        <a href="/admin/conversations">💬 Conversaciones</a>
+        <a href="/admin/agent-config" class="active">🤖 Agente Config</a>
+        <a href="/admin/calendar">📅 Calendario</a>
+        <a href="/admin/memory">🧠 Memoria</a>
+        <a href="/admin/appointments">📋 Citas</a>
+      </nav>
+    </div>
+
+    <div class="main">
+      <div class="topbar">
+        <h2>Configuración del Agente</h2>
+      </div>
+
+      <div class="content">
+        <div id="message" class="message" style="display: none"></div>
+
+        <div class="section">
+          <h2>📝 Información General</h2>
+          <div class="form-group">
+            <label>Nombre del Agente</label>
+            <input type="text" id="agentName" value="DeyyAgent" />
+          </div>
+          <div class="form-group">
+            <label>Temperatura (0.0 - 2.0)</label>
+            <input
+              type="number"
+              id="temperature"
+              step="0.1"
+              min="0"
+              max="2"
+              value="0.7"
+            />
+          </div>
+          <div class="form-group">
+            <label>Iteraciones Máximas</label>
+            <input
+              type="number"
+              id="maxIterations"
+              min="1"
+              max="20"
+              value="10"
+            />
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>💬 System Prompt</h2>
+          <div class="form-group">
+            <textarea
+              id="systemPrompt"
+              placeholder="Prompt del sistema..."
+            ></textarea>
+          </div>
+          <div class="form-group">
+            <label>Instrucciones Adicionales</label>
+            <textarea
+              id="customInstructions"
+              placeholder="Instrucciones extra..."
+            ></textarea>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>🔧 Herramientas Habilitadas</h2>
+          <div class="tools-list" id="toolsList">
+            <!-- Se llena con JS -->
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>📅 Google Calendar</h2>
+          <div class="checkbox-group">
+            <input type="checkbox" id="calendarEnabled" />
+            <label for="calendarEnabled"
+              >Habilitar integración con Google Calendar</label
+            >
+          </div>
+          <div class="form-group" style="margin-top: 10px">
+            <label>Calendar ID (email o 'primary')</label>
+            <input
+              type="text"
+              id="googleCalendarId"
+              placeholder="primary@group.calendar.google.com"
+            />
+          </div>
+          <div class="form-group">
+            <label>Timezone</label>
+            <select id="calendarTimezone">
+              <option value="America/Guayaquil">America/Guayaquil</option>
+              <option value="America/Bogota">America/Bogota</option>
+              <option value="America/Mexico_City">America/Mexico_City</option>
+              <option value="America/Argentina/Buenos_Aires">
+                America/Argentina/Buenos_Aires
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>🗂️ Mapeo de Servicios</h2>
+          <table class="mapping-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Servicio Oficial</th>
+                <th>Duración (min)</th>
+                <th>Odontólogo</th>
+                <th>Acción</th>
+              </tr>
+            </thead>
+            <tbody id="mappingTable">
+              <!-- Se llena con JS -->
+            </tbody>
+          </table>
+          <button
+            class="btn"
+            style="margin-top: 10px"
+            onclick="addMappingRow()"
+          >
+            + Añadir Servicio
+          </button>
+        </div>
+
+        <div class="section">
+          <button class="btn btn-success" onclick="saveConfig()">
+            💾 Guardar Configuración
+          </button>
+          <button class="btn" onclick="loadConfig()">🔄 Recargar</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        config: null,
+        tools: [
+          "consultar_disponibilidad",
+          "agendar_cita",
+          "obtener_citas_cliente",
+          "cancelar_cita",
+          "reagendar_cita",
+        ],
+      };
+
+      async function loadConfig() {
+        try {
+          const res = await fetch("/api/v1/agent/config");
+          if (!res.ok) throw new Error("Failed");
+          state.config = await res.json();
+          renderForm();
+          showMessage("Configuración cargada", "success");
+        } catch (e) {
+          showMessage("Error cargando config", "error");
+        }
+      }
+
+      function renderForm() {
+        const c = state.config;
+        document.getElementById("agentName").value = c.agent_name;
+        document.getElementById("temperature").value = c.temperature;
+        document.getElementById("maxIterations").value = c.max_iterations;
+        document.getElementById("systemPrompt").value = c.system_prompt;
+        document.getElementById("customInstructions").value =
+          c.custom_instructions || "";
+        document.getElementById("calendarEnabled").checked = c.calendar_enabled;
+        document.getElementById("googleCalendarId").value =
+          c.google_calendar_id || "";
+        document.getElementById("calendarTimezone").value = c.calendar_timezone;
+
+        // Tools checkboxes
+        const toolsList = document.getElementById("toolsList");
+        toolsList.innerHTML = state.tools
+          .map(
+            (tool) => `
+                <div class="tool-item">
+                    <input type="checkbox" value="${tool}" ${c.enabled_tools.includes(tool) ? "checked" : ""}>
+                    <label>${tool}</label>
+                </div>
+            `,
+          )
+          .join("");
+
+        // Mapping table
+        const mappingTable = document.getElementById("mappingTable");
+        mappingTable.innerHTML = Object.entries(c.calendar_mapping || {})
+          .map(
+            ([key, val]) => `
+                <tr>
+                    <td>${key}</td>
+                    <td>${val.service || key}</td>
+                    <td>${val.duration || 30}</td>
+                    <td>${val.dentist || "—"}</td>
+                    <td><button class="btn" style="padding:4px 8px; font-size:0.75rem;" onclick="removeMappingRow('${key}')">Eliminar</button></td>
+                </tr>
+            `,
+          )
+          .join("");
+      }
+
+      function addMappingRow() {
+        const keyword = prompt("Keyword (ej: limpieza):");
+        if (!keyword) return;
+        const service = prompt("Servicio oficial:", keyword);
+        const duration = prompt("Duración (min):", "30");
+        const dentist = prompt("Odontólogo (ID):", "");
+
+        const mapping = {};
+        mapping[keyword] = { duration: parseInt(duration), dentist, service };
+        Object.assign(state.config.calendar_mapping, mapping);
+        renderForm();
+      }
+
+      function removeMappingRow(keyword) {
+        delete state.config.calendar_mapping[keyword];
+        renderForm();
+      }
+
+      async function saveConfig() {
+        const enabledTools = [];
+        document.querySelectorAll("#toolsList input:checked").forEach((cb) => {
+          enabledTools.push(cb.value);
+        });
+
+        const payload = {
+          agent_name: document.getElementById("agentName").value,
+          temperature: parseFloat(document.getElementById("temperature").value),
+          max_iterations: parseInt(
+            document.getElementById("maxIterations").value,
+          ),
+          system_prompt: document.getElementById("systemPrompt").value,
+          custom_instructions:
+            document.getElementById("customInstructions").value,
+          enabled_tools: enabledTools,
+          calendar_enabled: document.getElementById("calendarEnabled").checked,
+          google_calendar_id:
+            document.getElementById("googleCalendarId").value || null,
+          calendar_timezone: document.getElementById("calendarTimezone").value,
+          calendar_mapping: state.config.calendar_mapping,
+          global_agent_enabled: state.config.global_agent_enabled,
+        };
+
+        try {
+          const res = await fetch("/api/v1/agent/config", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error("Failed");
+          showMessage("Configuración guardada", "success");
+        } catch (e) {
+          showMessage("Error guardando config", "error");
+        }
+      }
+
+      function showMessage(text, type) {
+        const el = document.getElementById("message");
+        el.textContent = text;
+        el.className = `message ${type}`;
+        el.style.display = "block";
+        setTimeout(() => (el.style.display = "none"), 3000);
+      }
+
+      // Cargar al iniciar
+      window.addEventListener("DOMContentLoaded", loadConfig);
+    </script>
+  </body>
+</html>

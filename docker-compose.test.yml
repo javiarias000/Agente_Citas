@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: arcadium-postgres-test
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: arcadium_test
+    ports:
+      - "5433:5432" # Puerto diferente para no conflictar con prod
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    networks:
+      - arcadium-test
+
+volumes:
+  postgres_test_data:
+
+networks:
+  arcadium-test:
+    driver: bridge

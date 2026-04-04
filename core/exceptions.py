@@ -78,7 +78,7 @@ class StateError(ArcadiumError):
 
 class ValidationError(ArcadiumError):
     """Error de validación de datos"""
-    def __init__(self, message: str, field: Optional[str] = None, value: Optional[Any] = None, schema: Optional[str] = None):
+    def __init__(self, message: str, field: Optional[str] = None, value: Optional[Any] = None, schema: Optional[str] = None, **kwargs):
         details = {}
         if field:
             details["field"] = field
@@ -86,6 +86,8 @@ class ValidationError(ArcadiumError):
             details["value"] = value
         if schema:
             details["schema"] = schema
+        # Aceptar cualquier otro detalle adicional
+        details.update(kwargs)
         super().__init__(message, code="VALIDATION_ERROR", details=details)
 
 

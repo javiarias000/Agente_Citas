@@ -4,10 +4,11 @@ Agente Deyy - Agente LangChain especializado para Arcadium
 Compatible con langchain==0.1.20
 """
 
+import asyncio
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from agents.langchain_compat import AgentExecutor, create_openai_tools_agent
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
@@ -147,17 +148,36 @@ IMPORTANTE:
 
             execution_time = (datetime.utcnow() - start_time).total_seconds()
 
+            tool_calls = self._extract_tool_calls(result)
+
+            # Extraer reasoning si existe herramienta 'think'
+            reasoning = None
+            for call in tool_calls:
+                if call["tool"] == "think" and call.get("observation"):
+                    reasoning = call["observation"]
+                    break
+
             return {
                 "status": "success",
                 "response": result.get("output", ""),
-                "tool_calls": self._extract_tool_calls(result),
-                "execution_time": execution_time
+                "tool_calls": tool_calls,
+                "execution_time": execution_time,
+                **({"reasoning": reasoning} if reasoning else {})
             }
 
         except Exception as e:
             execution_time = (datetime.utcnow() - start_time).total_seconds()
 
             self.logger.error("Error ejecutando agente", error=str(e))
+
+            # Si el agente no se pudo inicializar (no tiene executor), devolver "Agente no disponible"
+            if not self._initialized:
+                return {
+                    "status": "error",
+                    "response": "Agente no disponible",
+                    "error": str(e),
+                    "execution_time": execution_time
+                }
 
             return {
                 "status": "error",
@@ -173,10 +193,62 @@ IMPORTANTE:
             if len(step) >= 2:
                 action, observation = step
                 if hasattr(action, "tool"):
+                    tool_input = getattr(action, "tool_input", {})
+                    # Para herramienta 'think', extraer el campo 'thought' como string
+                    if action.tool == 'think' and isinstance(tool_input, dict):
+                        input_str = tool_input.get('thought', str(tool_input))
+                    else:
+                        input_str = str(tool_input)
+
                     tool_calls.append({
                         "tool": action.tool,
-                        "input": getattr(action, "tool_input", {}),
+                        "input": input_str,
                         "observation": str(observation)[:200]
                     })
 
         return tool_calls
+
+    async def reset(self):
+        """Reinicia la memoria del agente (limpia historial)"""
+        if self._memory is not None:
+            if hasattr(self._memory, 'clear'):
+                clear_method = self._memory.clear
+                try:
+                    # Intentar llamar como coroutine
+                    result = clear_method()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except TypeError:
+                    # Si clear() es sync, llamar sin await
+                    clear_method()
+            elif hasattr(self._memory, 'clear_memory'):
+                clear_method = self._memory.clear_memory
+                try:
+                    result = clear_method()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except TypeError:
+                    clear_method()
+async def get_agent_response(phone: str, message: str) -> Dict[str, Any]:
+    """
+    Helper function para obtener respuesta del agente Deyy.
+    
+    Args:
+        phone: Número de teléfono del usuario
+        message: Mensaje del usuario
+        
+    Returns:
+        Dict con status, response, tool_calls, execution_time
+    """
+    try:
+        agent = DeyyAgent(session_id=phone)
+        result = await agent.run(message)
+        return result
+    except Exception as e:
+        logger.error("Error en get_agent_response", error=str(e))
+        return {
+            "status": "error",
+            "response": "Agente no disponible",
+            "error": str(e),
+            "execution_time": 0.0
+        }

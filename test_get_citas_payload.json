@@ -1,0 +1,17 @@
+{
+  "body": {
+    "conversation": {
+      "messages": [
+        {
+          "sender": {
+            "phone_number": "+34612345678",
+            "name": "Juan Pérez"
+          },
+          "content": "¿Qué citas tengo agendadas?"
+        }
+      ]
+    }
+  },
+  "account_id": 1,
+  "conversation_id": 1004
+}

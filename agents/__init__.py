@@ -3,6 +3,7 @@
 Agents package - Agentes inteligentes de Arcadium
 """
 
-from .deyy_agent import DeyyAgent
+# NO importar agentes automáticamente para evitar circular imports
+# Importar explícitamente desde los módulos individuales cuando se necesite
 
-__all__ = ["DeyyAgent"]
+__all__ = []  # Se llenará según necesidades

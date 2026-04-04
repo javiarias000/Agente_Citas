@@ -10,59 +10,122 @@ from datetime import datetime
 import uuid
 import contextvars
 import structlog
+from uuid import UUID
 
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_openai import ChatOpenAI
 from pydantic import Field
 
 from core.config import get_settings
-from memory.memory_manager import MemoryManager
+from core.store import ArcadiumStore
+from graphs.deyy_graph import create_deyy_graph
 from services.appointment_service import AppointmentService, TimeSlot
 from services.whatsapp_service import WhatsAppService, WhatsAppMessage
 from services.google_calendar_service import GoogleCalendarService
+from services.project_appointment_service import ProjectAppointmentService
 from config.calendar_mapping import (
     get_service_from_keyword,
     get_duration_for_service,
     get_dentist_for_service,
     list_available_services
 )
+from utils.phone_utils import normalize_phone
+from db.models import ProjectAgentConfig
+from memory.memory_manager import MemoryManager
+from services.whatsapp_service import WhatsAppService, WhatsAppMessage
 
 logger = structlog.get_logger("agent.deyy")
 
+# Context vars para inyección segura en herramientas
+_phone_context = contextvars.ContextVar('phone_number', default=None)
+_project_context = contextvars.ContextVar('project_id', default=None)
+_project_config_context = contextvars.ContextVar('project_config', default=None)
+
+
+def set_current_phone(phone: str) -> contextvars.Token:
+    """Set current phone number in context"""
+    return _phone_context.set(phone)
+
+
+def get_current_phone() -> str:
+    """Get current phone number from context"""
+    phone = _phone_context.get()
+    if not phone:
+        raise ValueError("No phone number set in context")
+    return phone
+
+
+def reset_phone(token: contextvars.Token) -> None:
+    """Reset phone context"""
+    _phone_context.reset(token)
+
+
+def set_current_project(project_id: uuid.UUID, project_config: Optional[ProjectAgentConfig] = None) -> contextvars.Token:
+    """Set current project in context"""
+    _project_context.set(project_id)
+    _project_config_context.set(project_config)
+    return _project_context.token  # return token for resetting
+
+
+def get_current_project_id() -> Optional[uuid.UUID]:
+    """Get current project_id from context"""
+    return _project_context.get()
+
+
+def get_current_project_config() -> Optional[ProjectAgentConfig]:
+    """Get current project_config from context"""
+    return _project_config_context.get()
+
+
+def reset_project(token: contextvars.Token) -> None:
+    """Reset project context"""
+    _project_context.reset(token)
+    _project_config_context.reset(token)
+
 
 # ============================================
-# HELPER: Obtener AppointmentService configurado
+# HELPER: Obtener AppointmentService configurado (multi-tenant)
 # ============================================
 def _get_appointment_service() -> AppointmentService:
     """
-    Crea o devuelve AppointmentService con GoogleCalendar si está habilitado.
+    Crea o devuelve AppointmentService.
+    Si hay project_id en contexto, usa ProjectAppointmentService.
+    Si no, usa el servicio global (legacy single-tenant).
 
     Returns:
         AppointmentService configurado
     """
-    settings = get_settings()
+    # Verificar si hay proyecto en contexto
+    project_id = get_current_project_id()
+    project_config = get_current_project_config()
 
-    if settings.GOOGLE_CALENDAR_ENABLED:
-        try:
-            gcal = GoogleCalendarService(
-                calendar_id=settings.GOOGLE_CALENDAR_DEFAULT_ID,
-                credentials_path=settings.GOOGLE_CALENDAR_CREDENTIALS_PATH,
-                timezone=settings.GOOGLE_CALENDAR_TIMEZONE
-            )
-            return AppointmentService(
-                settings=settings,
-                google_calendar_service=gcal
-            )
-        except Exception as e:
-            logger.warning(
-                "No se pudo inicializar Google Calendar, usando solo DB",
-                error=str(e)
-            )
-            return AppointmentService(settings=settings)
+    if project_id and project_config:
+        # Modo multi-tenant: usar servicio específico del proyecto
+        return ProjectAppointmentService(project_config)
     else:
-        return AppointmentService(settings=settings)
+        # Modo legacy: usar servicio global con settings
+        settings = get_settings()
+
+        if settings.GOOGLE_CALENDAR_ENABLED:
+            try:
+                gcal = GoogleCalendarService(
+                    calendar_id=settings.GOOGLE_CALENDAR_DEFAULT_ID,
+                    credentials_path=settings.GOOGLE_CALENDAR_CREDENTIALS_PATH,
+                    timezone=settings.GOOGLE_CALENDAR_TIMEZONE
+                )
+                return AppointmentService(
+                    settings=settings,
+                    google_calendar_service=gcal
+                )
+            except Exception as e:
+                logger.warning(
+                    "No se pudo inicializar Google Calendar, usando solo DB",
+                    error=str(e)
+                )
+                return AppointmentService(settings=settings)
+        else:
+            return AppointmentService(settings=settings)
 
 
 # ============================================
@@ -750,6 +813,350 @@ async def reagendar_cita(
         }
 
 
+# ============================================
+# HERRAMIENTAS ADICIONALES (WhatsApp, Perfiles, Knowledge)
+# ============================================
+
+@tool
+async def enviar_mensaje_whatsapp(
+    to: Annotated[str, Field(description="Número de teléfono destino (formato internacional)")],
+    text: Annotated[str, Field(description="Texto del mensaje")],
+    buttons: Annotated[Optional[List[Dict[str, str]]], Field(description="Botones interactivos (max 3)")] = None
+) -> Dict[str, Any]:
+    """
+    Envía un mensaje de WhatsApp a un número.
+
+    USAR CUANDO:
+    - Confirmar cita por WhatsApp
+    - Enviar recordatorios
+    - Notificar cambios importantes
+    - Comunicarte fuera de la conversación
+
+    IMPORTANTE:
+    - Respeta horarios laborales (9:00-18:00)
+    - No abuses: solo para comunicaciones necesarias
+    - Máximo 3 botones por mensaje
+    """
+    try:
+        # Obtener whatsapp_service (podría inyectarse como dependencia)
+        whatsapp_service = WhatsAppService()
+
+        message = WhatsAppMessage(
+            to=to,
+            text=text,
+            buttons=buttons[:3] if buttons else None
+        )
+
+        result = await whatsapp_service.send_message(message)
+
+        return {
+            "success": result.get("success", False),
+            "message_id": result.get("message_id"),
+            "status": result.get("status"),
+            "to": to
+        }
+
+    except Exception as e:
+        logger.error("Error enviando WhatsApp", to=to, error=str(e))
+        return {
+            "success": False,
+            "error": str(e),
+            "to": to
+        }
+
+
+@tool
+async def obtener_perfil_usuario(
+    phone_number: Annotated[str, Field(description="Número de teléfono del usuario")]
+) -> Dict[str, Any]:
+    """
+    Obtiene el perfil completo de un usuario desde memoria a largo plazo.
+
+    Información disponible:
+    - Preferencias (servicios favoritos, horarios)
+    - Notas médicas o de cliente
+    - Hechos extraídos de conversaciones previas
+    - Total de conversaciones
+    - Fechas first_seen / last_seen
+
+    USAR CUANDO:
+    - El usuario regresa y quieres personalizar la atención
+    - Para recordar preferencias
+    - Antes de actualizar perfil (ver estado actual)
+    """
+    try:
+        memory_manager = MemoryManager()
+        # TODO: Obtener project_id desde contexto
+        project_id = None
+
+        profile = await memory_manager.get_user_profile(phone_number, project_id)
+
+        if profile is None:
+            return {
+                "found": False,
+                "phone_number": phone_number,
+                "message": "Perfil no encontrado"
+            }
+
+        return {
+            "found": True,
+            "phone_number": phone_number,
+            "profile": profile
+        }
+
+    except Exception as e:
+        logger.error("Error obteniendo perfil", phone=phone_number, error=str(e))
+        return {
+            "found": False,
+            "error": str(e),
+            "phone_number": phone_number
+        }
+
+
+@tool
+async def actualizar_perfil_usuario(
+    phone_number: Annotated[str, Field(description="Número de teléfono del usuario")],
+    preferences: Annotated[Optional[Dict[str, Any]], Field(description="Preferencias a actualizar")] = None,
+    notes: Annotated[Optional[str], Field(description="Notas adicionales")] = None,
+    extracted_facts: Annotated[Optional[Dict[str, Any]], Field(description="Hechos extraídos de la conversación")] = None
+) -> Dict[str, Any]:
+    """
+    Actualiza el perfil del usuario con nueva información.
+
+    USAR CUANDO:
+    - El usuario menciona preferencias (ej: "prefiero los viernes")
+    - Extraes hechos relevantes de la conversación
+    - Necesitas guardar notas médicas o de cliente
+    - Actualizas información de contacto o servicios de interés
+
+    NOTA:
+    - Campos opcionales: solo actualiza los campos proporcionados
+    - preferences: merge con existentes
+    - notes: concatena con notas previas
+    - extracted_facts: merge con existentes
+    """
+    try:
+        memory_manager = MemoryManager()
+        project_id = None
+
+        # Obtener perfil existente
+        existing = await memory_manager.get_user_profile(phone_number, project_id)
+
+        update_data = {}
+        if preferences is not None:
+            existing_prefs = existing.get('preferences', {}) if existing else {}
+            if isinstance(existing_prefs, dict):
+                existing_prefs.update(preferences)
+            update_data['preferences'] = existing_prefs
+
+        if notes is not None:
+            existing_notes = existing.get('notes', '') if existing else ''
+            update_data['notes'] = (existing_notes + "\n" + notes) if existing_notes else notes
+
+        if extracted_facts is not None:
+            existing_facts = existing.get('extracted_facts', {}) if existing else {}
+            if isinstance(existing_facts, dict):
+                existing_facts.update(extracted_facts)
+            update_data['extracted_facts'] = existing_facts
+
+        # Guardar
+        profile = await memory_manager.create_or_update_profile(
+            phone_number=phone_number,
+            project_id=project_id,
+            **update_data
+        )
+
+        # Incrementar contador de conversaciones
+        await memory_manager.increment_user_conversation_count(phone_number, project_id)
+        await memory_manager.update_user_last_seen(phone_number, project_id)
+
+        return {
+            "success": True,
+            "phone_number": phone_number,
+            "profile": profile
+        }
+
+    except Exception as e:
+        logger.error("Error actualizando perfil", phone=phone_number, error=str(e))
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@tool
+async def knowledge_base_search(
+    query: Annotated[str, Field(description="Consulta de búsqueda")],
+    k: Annotated[int, Field(description="Número de resultados (1-20)", ge=1, le=20)] = 5,
+    similarity_threshold: Annotated[float, Field(description="Umbral mínimo de similitud (0-1)", ge=0, le=1)] = 0.7
+) -> Dict[str, Any]:
+    """
+    Busca información en la base de conocimientos (Supabase vector store).
+
+    USAR CUANDO:
+    - Necesitas información de la clínica, servicios, precios, políticas
+    - El usuario pregunta sobre tratamientos, cuidados, procedimientos
+    - Para responder preguntas frecuentes
+    - Para acceder a documentación interna
+
+    Retorna documentos relevantes con puntuaciones de similitud.
+    """
+    try:
+        # Intentar crear vectorstore
+        try:
+            vectorstore = LangChainComponentFactory.create_supabase_vectorstore()
+        except Exception as e:
+            logger.warning("Vectorstore no disponible", error=str(e))
+            return {
+                "status": "error",
+                "error": "Base de conocimientos no disponible",
+                "documents": []
+            }
+
+        # Búsqueda
+        docs = vectorstore.similarity_search_with_relevance_scores(
+            query=query,
+            k=k
+        )
+
+        # Filtrar por umbral
+        filtered = [
+            {
+                "content": doc.page_content[:500],  # Limitar longitud
+                "metadata": doc.metadata,
+                "score": float(score)
+            }
+            for doc, score in docs
+            if score >= similarity_threshold
+        ]
+
+        return {
+            "status": "success",
+            "query": query,
+            "total_results": len(filtered),
+            "documents": filtered
+        }
+
+    except Exception as e:
+        logger.error("Error en knowledge search", query=query, error=str(e))
+        return {
+            "status": "error",
+            "error": str(e),
+            "documents": []
+        }
+
+
+@tool
+async def think(
+    thought: Annotated[str, Field(description="Pensamiento a estructurar")],
+    context: Annotated[Optional[str], Field(description="Contexto adicional")] = None,
+    focus_areas: Annotated[Optional[List[str]], Field(description="Áreas específicas a considerar")] = None
+) -> str:
+    """
+    Razonamiento estructurado para problemas complejos.
+
+    USAR CUANDO:
+    - Analizar situaciones complicadas antes de actuar
+    - Evaluar múltiples opciones
+    - Identificar riesgos
+    - Estructurar pensamiento lógico
+
+    Retorna: Razonamiento completo estructurado
+    """
+    reasoning = f"""
+RAZONAMIENTO ESTRUCTURADO
+===========================
+
+PROBLEMA:
+{thought}
+
+CONTEXTO:
+{context or 'No especificado'}
+
+FOCUS AREAS:
+{', '.join(focus_areas) if focus_areas else 'General'}
+
+ANÁLISIS:
+1. ¿Cuál es el problema real?
+   - Identificar causa raíz
+   - Separar síntomas de problema
+
+2. ¿Qué información tengo?
+   - Datos disponibles
+   - Datos faltantes
+   - Supuestos
+
+3. ¿Qué opciones hay?
+   - Múltiples soluciones posibles
+   - Pros y contras de cada una
+
+4. ¿Qué riesgos hay?
+   - Posibles fallos
+   - Impacto de errores
+   - Mitigaciones
+
+5. ¿Qué he decidido?
+   - Razón de la decisión
+   - Alternativas descartadas
+   - Próximos pasos
+
+IMPLICACIONES:
+- Impacto en sistema existente
+- Recursos necesarios
+- Tiempo de implementación
+
+CONCLUSIÓN:
+La mejor aproximación después de analizar el problema es...
+""".strip()
+
+    return reasoning
+
+
+@tool
+async def planificador_obligatorio(
+    task: Annotated[str, Field(description="Tarea a planificar")],
+    constraints: Annotated[Optional[str], Field(description="Restricciones o consideraciones")] = None,
+    max_steps: Annotated[int, Field(description="Máximo número de pasos", ge=1, le=50)] = 10
+) -> Dict[str, Any]:
+    """
+    Planifica tareas complejas descomponiéndolas en pasos ejecutables.
+
+    USAR CUANDO:
+    - Implementaciones grandes
+    - Proyectos con múltiples pasos
+    - Cualquier cosa que requiera secuencia lógica
+
+    Retorna: Plan con pasos secuenciales y estimaciones
+    """
+    plan = {
+        "task": task,
+        "constraints": constraints or "Ninguna",
+        "steps": [],
+        "estimated_time": "TBD",
+        "dependencies": []
+    }
+
+    # Placeholder: dividir en pasos lógicos
+    # TODO: Integrar con LLM para generar plan real
+    steps = [
+        {"step": 1, "description": "Analizar requisitos", "estimated": "1h"},
+        {"step": 2, "description": "Diseñar solución", "estimated": "2h"},
+        {"step": 3, "description": "Implementar", "estimated": "4h"},
+        {"step": 4, "description": "Testear", "estimated": "2h"},
+        {"step": 5, "description": "Desplegar", "estimated": "1h"}
+    ]
+
+    plan["steps"] = steps[:max_steps]
+    plan["estimated_time"] = sum([2, 2, 4, 2, 1][:max_steps])
+
+    return {
+        "status": "success",
+        "plan": plan,
+        "total_steps": len(plan["steps"]),
+        "tool": "planificador_obligatorio"
+    }
+
+
 class DeyyAgent:
     """
     Agente principal Deyy
@@ -774,6 +1181,7 @@ Gestión de Calendario:
 
 Tus capacidades (herramientas):
 
+📅 GESTIÓN DE CITAS:
 1. consultar_disponibilidad(fecha, servicio_opcional)
    - Consulta horarios libres en Google Calendar
    - Si servicio especificado, usa su duración exacta
@@ -803,6 +1211,36 @@ Tus capacidades (herramientas):
    - Actualiza evento en Google + DB
    - Requiere confirmación
 
+📱 COMUNICACIÓN:
+6. enviar_mensaje_whatsapp(to, text, buttons_opcional)
+   - Envía mensaje de WhatsApp
+   - Para confirmaciones, recordatorios, notificaciones
+   - Respeta horarios laborales (9-18)
+   - Máximo 3 botones por mensaje
+
+🧠 CONOCIMIENTO Y MEMORIA:
+7. knowledge_base_search(query, k=5, similarity_threshold=0.7)
+   - Busca en base de conocimientos
+   - Ideal para servicios, precios, políticas, cuidados
+   - Retorna documentos relevantes con scores
+
+8. obtener_perfil_usuario(phone_number)
+   - Obtiene preferencias, notas, hechos del usuario
+   - Para personalizar atención
+
+9. actualizar_perfil_usuario(phone_number, preferences, notes, extracted_facts)
+   - Guarda preferencias, notas, hechos extraídos
+   - Todos los campos opcionales (merge con existentes)
+
+🤝 RAZONAMIENTO Y PLANIFICACIÓN:
+10. think(thought, context, focus_areas)
+    - Razonamiento estructurado para problemas complejos
+    - Analiza opciones, riesgos, implicaciones
+
+11. planificador_obligatorio(task, constraints, max_steps)
+    - Descompone tareas en pasos ejecutables
+    - Para implementaciones, proyectos grandes
+
 Flujos recomendados:
 
 🟢 AGENDAR NUEVA CITA:
@@ -819,7 +1257,7 @@ Tras recibir datos:
 
 🟢 CONSULTAR DISPONIBILIDAD:
 Cliente: "¿Hay libre el 25/12/2025?" o "¿Cuándo hay para una limpieza?"
-Tú: Usa consultar_disponibilidad con fecha y servicio (si se especifica)
+Tú: Usa consulta_disponibilidad con fecha y servicio (si se especifica)
    - Si hay slots: muestra lista
    - Si no hay: sugiere otra fecha
 
@@ -845,6 +1283,18 @@ Tú: Obtener citas con obtener_citas_cliente()
    - Confirmar antes de reagendar
    - Usar reagendar_cita()
 
+🟢 ENVIAR CONFIRMACIÓN:
+Después de agendar/reagendar:
+   - Usa enviar_mensaje_whatsapp para confirmación
+   - Incluye link del evento Google si está disponible
+   - Información clara: fecha, hora, servicio
+
+🟢 PERSONALIZAR ATENCIÓN:
+Si el usuario regresa:
+   - Usa obtener_perfil_usuario para recordar preferencias
+   - "Veo que la última vez tuviste [servicio]..."
+   - Sugiere según historial y preferencias
+
 Reglas CRÍTICAS (NUNCA violar):
 
 ❌ NO agendes sin validar fecha/hora primero
@@ -852,15 +1302,20 @@ Reglas CRÍTICAS (NUNCA violar):
 ❌ NO ignores horario laboral (Lun-Vie 9-18)
 ❌ NO uses fechas en el pasado
 ❌ NO inventes horarios; siempre consulta Google Calendar primero
+❌ NO_enviar WhatsApp fuera de horario laboral
+❌ NO compartas datos sensibles en WhatsApp
 ✅ SIEMPRE valida fecha/hora con check_availability antes de agendar
 ✅ SIEMPRE confirma detalles (fecha exacta, hora, servicio, duración)
 ✅ SIEMPRE muestra link del evento Google si está disponible
 ✅ SIEMPRE usa tone natural y amigable
+✅ SIEMPRE guarda preferencias y hechos en perfil del usuario
+✅ SIEMPRE consulta knowledge base para preguntas sobre servicios
 
 Manejo de errores:
 - Si Google Calendar falla: informa "Momento, hay un problema técnico..."
 - Si slot ya no disponible: "Ups, alguien más agendó. Te muestro otras opciones..."
 - Si no entiendes el servicio: pregunta clarifying questions
+- Si WhatsApp falla: informa y continúa (no bloquea)
 
 Contexto importante:
 - Clínica dental con múltiples especialistas
@@ -874,6 +1329,8 @@ Contexto importante:
   * Implantes: 90 min
   * Estética: 60 min
   * Odontopediatría: 30-45 min
+  * Blanqueamiento: 60 min
+  * Revisión: 30 min
 
 NO inventes duraciones; usa la duración estándar del servicio.
 
@@ -883,39 +1340,68 @@ Responde siempre en español, tono natural y amigable.
     def __init__(
         self,
         session_id: str,
-        memory_manager: MemoryManager,
+        store: ArcadiumStore,  # Ahora usa Store en lugar de MemoryManager directo
+        project_id: Optional[uuid.UUID] = None,
+        project_config: Optional[ProjectAgentConfig] = None,
         whatsapp_service: Optional[WhatsAppService] = None,
         system_prompt: Optional[str] = None,
         llm_model: Optional[str] = None,
-        llm_temperature: float = 0.7,
-        verbose: bool = False
+        llm_temperature: Optional[float] = None,
+        max_iterations: Optional[int] = None,
+        verbose: bool = False,
+        checkpointer: Optional[Any] = None  # Para inyectar checkpointer en tests
     ):
         self.session_id = session_id
-        self.memory_manager = memory_manager
+        self.store = store  # ArcadiumStore (wrapper sobre MemoryManager)
+        self.project_id = project_id
+        self.project_config = project_config
         self.whatsapp_service = whatsapp_service
-        self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
-        self.llm_model = llm_model or get_settings().OPENAI_MODEL
-        self.llm_temperature = llm_temperature
+        self._checkpointer = checkpointer  # Guardar para inyectar en create_deyy_graph
+
+        # Configuración desde project_config o settings
+        settings = get_settings()
+        self.llm_model = llm_model or (project_config.agent_name if project_config else settings.OPENAI_MODEL)
+        self.llm_temperature = llm_temperature if llm_temperature is not None else (project_config.temperature if project_config else settings.OPENAI_TEMPERATURE)
+        self.max_iterations = max_iterations or (project_config.max_iterations if project_config else settings.AGENT_MAX_ITERATIONS)
+
+        # System prompt con variables de proyecto
+        if project_config and project_config.system_prompt:
+            # Aplicar variables del template
+            base_prompt = project_config.system_prompt
+            formatted_prompt = base_prompt.format(
+                project_name=project_config.project.name if project_config.project else "Arcadium",
+                custom_instructions=project_config.custom_instructions or ""
+            )
+            self.system_prompt = system_prompt or formatted_prompt
+        else:
+            self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
+
         self.verbose = verbose
 
         self._llm: Optional[ChatOpenAI] = None
-        self._agent_executor: Optional[AgentExecutor] = None
+        self._graph = None  # StateGraph
         self._initialized = False
+
+        # Servicio de citas específico del proyecto
+        self.appointment_service: Optional[ProjectAppointmentService] = None
 
         logger.info(
             "DeyyAgent creado",
             session_id=session_id,
+            project_id=str(project_id) if project_id else None,
             model=self.llm_model
         )
         logger.debug(f"DeyyAgent.__init__ completado: {session_id}")
 
     async def initialize(self):
-        """Inicializa el agente con LangChain"""
+        """Inicializa el agente con StateGraph (DeyyGraph)"""
         if self._initialized:
             return
 
-        logger.info("Inicializando DeyyAgent")
-        logger.debug(f"Inicializando agente {self.session_id}")
+        logger.info(
+            "Inicializando DeyyAgent",
+            project_id=str(self.project_id) if self.project_id else None
+        )
 
         # Crear LLM
         logger.debug("Creando ChatOpenAI...")
@@ -928,66 +1414,132 @@ Responde siempre en español, tono natural y amigable.
         )
         logger.debug("LLM creado")
 
-        # Definir herramientas (ya decoradas con @tool)
-        tools = [
-            consultar_disponibilidad,  # Primero: consulta antes de agendar
+        # Inicializar servicio de citas para este proyecto
+        if self.project_config:
+            self.appointment_service = ProjectAppointmentService(self.project_config)
+            logger.info(
+                "ProjectAppointmentService creado",
+                project_id=str(self.project_id),
+                calendar_enabled=self.project_config.calendar_enabled
+            )
+        else:
+            # Fallback al servicio global (single-tenant legacy)
+            self.appointment_service = _get_appointment_service()
+            logger.info("Usando AppointmentService global (legacy mode)")
+
+        # Crear DeyyGraph (StateGraph)
+        logger.debug("Creando DeyyGraph...")
+        # Recopilar herramientas definidas en este módulo
+        from agents.deyy_agent import (
             agendar_cita,
+            consultar_disponibilidad,
             obtener_citas_cliente,
             cancelar_cita,
-            reagendar_cita
+            reagendar_cita,
+            enviar_mensaje_whatsapp,
+            obtener_perfil_usuario,
+            actualizar_perfil_usuario,
+            knowledge_base_search,
+            think,
+            planificador_obligatorio
+        )
+        tools = [
+            agendar_cita,
+            consultar_disponibilidad,
+            obtener_citas_cliente,
+            cancelar_cita,
+            reagendar_cita,
+            enviar_mensaje_whatsapp,
+            obtener_perfil_usuario,
+            actualizar_perfil_usuario,
+            knowledge_base_search,
+            think,
+            planificador_obligatorio
         ]
-        logger.debug(f"Tools list: {[t.__name__ if hasattr(t,'__name__') else str(t) for t in tools]}")
 
-        # Crear prompt
-        logger.debug("Creando prompt...")
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad")
-        ])
-        logger.debug("Prompt creado")
-
-        # Crear agente
-        logger.debug("Creando agente con create_openai_tools_agent...")
-        agent = create_openai_tools_agent(
-            llm=self._llm,
+        self._graph = await create_deyy_graph(
+            session_id=self.session_id,
+            store=self.store,
+            project_id=self.project_id,
+            system_prompt=self.system_prompt,
+            llm_model=self.llm_model,
+            llm_temperature=self.llm_temperature,
             tools=tools,
-            prompt=prompt
+            checkpointer=self._checkpointer if self._checkpointer else None
         )
-        logger.debug("Agente creado")
-
-        # Crear executor
-        logger.debug("Creando AgentExecutor...")
-        self._agent_executor = AgentExecutor(
-            agent=agent,
-            tools=tools,
-            verbose=self.verbose,
-            handle_parsing_errors=True,
-            max_iterations=get_settings().AGENT_MAX_ITERATIONS,
-            early_stopping_method="generate",
-            return_intermediate_steps=True
-        )
-        logger.debug("Executor creado")
 
         self._initialized = True
-        logger.info("DeyyAgent inicializado")
-        logger.debug(f"DeyyAgent {self.session_id} inicializado completamente")
+        logger.info("DeyyAgent inicializado con StateGraph")
+
+    async def _check_agent_toggle(self) -> bool:
+        """
+        Verifica si el agente está habilitado para esta conversación.
+
+        Returns:
+            True si habilitado, False si deshabilitado
+        """
+        if not self.project_id:
+            # Sin proyecto, asumir habilitado
+            return True
+
+        # Consultar AgentToggle en DB
+        try:
+            from db import get_async_session
+            from db.models import AgentToggle
+
+            async with get_async_session() as session:
+                stmt = select(AgentToggle).where(
+                    AgentToggle.conversation_id == uuid.UUID(self.session_id)
+                    # Nota: session_id es phone_number, pero AgentToggle usa conversation_id FK.
+                    # Necesito buscar la Conversation primero.
+                )
+                # En realidad: AgentToggle tiene conversation_id FK. Necesito obtener conversation por phone+project.
+                from db.models import Conversation
+                conv_stmt = select(Conversation).where(
+                    Conversation.phone_number == self.session_id,
+                    Conversation.project_id == self.project_id
+                )
+                result = await session.execute(conv_stmt)
+                conversation = result.scalar_one_or_none()
+
+                if conversation:
+                    toggles_stmt = select(AgentToggle).where(
+                        AgentToggle.conversation_id == conversation.id
+                    )
+                    toggles_result = await session.execute(toggles_stmt)
+                    toggle = toggles_result.scalar_one_or_none()
+
+                    if toggle:
+                        logger.debug(
+                            "AgentToggle encontrado",
+                            conversation_id=str(conversation.id),
+                            is_enabled=toggle.is_enabled
+                        )
+                        return toggle.is_enabled
+
+                # Si no hay toggle explícito, verificar project_config.global_agent_enabled
+                if self.project_config:
+                    return self.project_config.global_agent_enabled
+
+                return True  # default habilitado
+
+        except Exception as e:
+            logger.error(
+                "Error verificando agent toggle, asumiendo habilitado",
+                error=str(e),
+                session_id=self.session_id,
+                project_id=str(self.project_id)
+            )
+            return True
 
     async def process_message(
         self,
         message: str,
-        save_to_memory: bool = True
+        save_to_memory: bool = True,
+        check_toggle: bool = True
     ) -> Dict[str, Any]:
         """
-        Procesa un mensaje del usuario
-
-        Args:
-            message: Texto del mensaje
-            save_to_memory: Si guardar en historial
-
-        Returns:
-            Dict con respuesta y metadata
+        Procesa un mensaje del usuario usando StateGraph.
         """
         start_time = datetime.utcnow()
 
@@ -998,45 +1550,81 @@ Responde siempre en español, tono natural y amigable.
             # Extraer phone_number del session_id (para tools)
             phone = self._extract_phone_from_session(self.session_id)
 
+            # Establecer contexto de proyecto (para tools)
+            project_token = None
+            if self.project_id:
+                project_token = set_current_project(self.project_id, self.project_config)
+
+            # Verificar toggle si se requiere (agente habilitado)
+            if check_toggle and self.project_id:
+                toggle_enabled = await self._check_agent_toggle()
+                if not toggle_enabled:
+                    logger.info(
+                        "Agente deshabilitado para esta conversación",
+                        session_id=self.session_id,
+                        project_id=str(self.project_id)
+                    )
+                    # Aún así guardar el mensaje del usuario en memoria?
+                    if save_to_memory:
+                        await self.store.add_message(
+                            self.session_id,
+                            message,
+                            message_type="human",
+                            project_id=self.project_id
+                        )
+                    return {
+                        "status": "agent_disabled",
+                        "response": "Lo siento, el agente está temporalmente deshabilitado para esta conversación. Un administrador te asistirá pronto.",
+                        "agent_disabled": True
+                    }
+
             # Establecer contexto de phone para las tools
             token = set_current_phone(phone)
 
             try:
-                # Ejecutar agente
-                result = await self._agent_executor.ainvoke({
-                    "input": message,
-                    "chat_history": await self.memory_manager.get_history(self.session_id)
-                })
+                # 1. Cargar historial desde store
+                history = await self.store.get_history(self.session_id)
 
-                response = result.get("output", "")
-                tool_calls = self._extract_tool_calls(result)
+                logger.info(
+                    "Historial cargado",
+                    session_id=self.session_id,
+                    message_count=len(history),
+                    phone=phone
+                )
+
+                # 2. Crear estado DeyyState
+                from graphs.deyy_graph import DeyyState
+                state = DeyyState(
+                    messages=history,
+                    phone_number=phone,
+                    project_id=self.project_id
+                )
+
+                # 3. Añadir mensaje del usuario
+                state["messages"].append(HumanMessage(content=message))
+
+                # 4. Invocar StateGraph
+                config = {"configurable": {"thread_id": self.session_id}}
+                result = await self._graph.ainvoke(state, config=config)
+
+                # 5. Extraer respuesta (último mensaje AI)
+                response = ""
+                if result.get("messages"):
+                    ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
+                    if ai_messages:
+                        response = ai_messages[-1].content
 
                 execution_time = (datetime.utcnow() - start_time).total_seconds()
 
-                # Guardar en memoria
-                if save_to_memory:
-                    await self.memory_manager.add_message(
-                        session_id=self.session_id,
-                        content=message,
-                        message_type="human"
-                    )
-                    await self.memory_manager.add_message(
-                        session_id=self.session_id,
-                        content=response,
-                        message_type="ai"
-                    )
-
                 logger.info(
-                    "Mensaje procesado",
+                    "Mensaje procesado con StateGraph",
                     session_id=self.session_id,
-                    execution_time=execution_time,
-                    tool_calls=len(tool_calls)
+                    execution_time=execution_time
                 )
 
                 return {
                     "status": "success",
                     "response": response,
-                    "tool_calls": tool_calls,
                     "execution_time_seconds": execution_time,
                     "session_id": self.session_id
                 }
@@ -1044,6 +1632,9 @@ Responde siempre en español, tono natural y amigable.
             finally:
                 # Resetear contexto de phone
                 reset_phone(token)
+                # Resetear contexto de proyecto
+                if project_token:
+                    reset_project(project_token)
 
         except Exception as e:
             execution_time = (datetime.utcnow() - start_time).total_seconds()
@@ -1057,64 +1648,29 @@ Responde siempre en español, tono natural y amigable.
             print(f"\n=== AGENT ERROR en session {self.session_id} ===")
             traceback.print_exc()
             print("=== END AGENT ERROR ===\n")
-            raise
             return {
                 "status": "error",
-                "response": "Lo siento, ocurrió un error procesando tu mensaje.",
+                "response": "Lo siento, ocurrió un error procesando你的 mensaje.",
                 "error": str(e),
                 "execution_time_seconds": execution_time,
                 "session_id": self.session_id
             }
-
     def _extract_tool_calls(self, result: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Extrae información de tool calls del resultado"""
-        tool_calls = []
-
-        intermediate_steps = result.get("intermediate_steps", [])
-        for step in intermediate_steps:
-            if len(step) >= 2:
-                action, observation = step
-                # Obtener nombre de la herramienta de forma segura
-                # action.tool puede ser: string, StructuredTool, Tool object
-                tool = action.tool
-                if isinstance(tool, str):
-                    tool_name = tool
-                else:
-                    # Intentar obtener .name, sino usar __name__ o str()
-                    tool_name = getattr(tool, 'name', None)
-                    if tool_name is None:
-                        tool_name = getattr(tool, '__name__', None)
-                    if tool_name is None:
-                        tool_name = str(tool).split(' ')[0]  # Fallback seguro
-
-                # Asegurar que el input sea JSON serializable
-                tool_input = getattr(action, "tool_input", {})
-                if not isinstance(tool_input, dict):
-                    tool_input = {"value": str(tool_input)}
-
-                # Debug: log del tipo de herramienta
-                logger.debug("Tool extraction", tool_type=type(tool).__name__, tool_name=tool_name)
-
-                tool_calls.append({
-                    "tool": tool_name,
-                    "input": tool_input,
-                    "observation": str(observation)[:500] if observation else None
-                })
-
-        return tool_calls
-
-    async def clear_memory(self) -> None:
-        """Limpia historial de memoria"""
-        await self.memory_manager.clear_session(self.session_id)
-        logger.info("Memoria limpiada", session_id=self.session_id)
+        """Extrae tool calls del resultado del agente (por implementar)"""
+        # TODO: implementar extracción de tool calls
+        return []
 
     def _extract_phone_from_session(self, session_id: str) -> str:
         """
         Extrae número de teléfono del session_id.
         Session ID suele ser el número o un UUID.
+        Normaliza el número a formato E.164.
         """
-        # Si session_id tiene formato de teléfono, usarlo directamente
+        # Si session_id tiene formato de teléfono, normalizarlo
         if "@" not in session_id and session_id.replace("+", "").isdigit():
-            return session_id
+            try:
+                return normalize_phone(session_id)
+            except ValueError:
+                return session_id  # Fallback: usar original
         # Si no, extraer de alguna otra fuente
         return session_id

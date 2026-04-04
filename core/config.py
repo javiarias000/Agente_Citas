@@ -99,6 +99,12 @@ class Settings(BaseSettings):
         description="Prompt del sistema personalizado"
     )
 
+    # State Machine (nuevo en v2.1)
+    ENABLE_STATE_MACHINE: bool = Field(
+        default=True,
+        description="Habilitar State Machine pattern para DeyyAgent (usa SupportState + middleware)"
+    )
+
     # Logging
     LOG_LEVEL: str = Field(
         default="INFO",
@@ -162,6 +168,20 @@ class Settings(BaseSettings):
         default=None,
         description="URI de redirección para OAuth flow (ej: http://localhost:8000/oauth2callback)"
     )
+    MCP_GOOGLE_CALENDAR_ENDPOINT: Optional[str] = Field(
+        default=None,
+        description="Endpoint del MCP server para Google Calendar"
+    )
+
+    # Supabase (para vectorstore)
+    SUPABASE_URL: Optional[str] = Field(
+        default=None,
+        description="URL de Supabase para pgvector"
+    )
+    SUPABASE_ANON_KEY: Optional[str] = Field(
+        default=None,
+        description="Clave anónima de Supabase"
+    )
 
     @field_validator('WHATSAPP_API_URL')
     @classmethod
@@ -221,3 +241,7 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+# Instancia global por defecto (para compatibilidad con imports existentes)
+settings = get_settings()

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login - Arcadium Admin</title>
+    <style>
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+      }
+      .login-box {
+        background: white;
+        padding: 40px;
+        border-radius: 12px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        width: 100%;
+        max-width: 400px;
+      }
+      h1 {
+        text-align: center;
+        margin-bottom: 30px;
+        color: #1f2937;
+      }
+      .form-group {
+        margin-bottom: 20px;
+      }
+      label {
+        display: block;
+        margin-bottom: 6px;
+        font-weight: 500;
+        color: #374151;
+      }
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font-size: 1rem;
+      }
+      input:focus {
+        outline: none;
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+      }
+      .btn {
+        width: 100%;
+        padding: 12px;
+        background: #667eea;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      .btn:hover {
+        background: #5a67d8;
+      }
+      .error {
+        background: #fee2e2;
+        color: #991b1b;
+        padding: 10px;
+        border-radius: 6px;
+        margin-bottom: 15px;
+        display: none;
+      }
+      .info {
+        background: #dbeafe;
+        color: #1e40af;
+        padding: 10px;
+        border-radius: 6px;
+        margin-bottom: 15px;
+        font-size: 0.875rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="login-box">
+      <h1>🔐 Arcadium Admin</h1>
+      <div class="info">
+        Usa la API Key generada para acceder. La puedes encontrar en los logs
+        del seed.
+      </div>
+      <div class="error" id="errorMsg"></div>
+      <form onsubmit="login(event)">
+        <div class="form-group">
+          <label>API Key</label>
+          <input
+            type="text"
+            id="apiKey"
+            placeholder="Introduce tu API key"
+            required
+          />
+        </div>
+        <button type="submit" class="btn">Acceder</button>
+      </form>
+    </div>
+
+    <script>
+      async function login(e) {
+        e.preventDefault();
+        const apiKey = document.getElementById("apiKey").value.trim();
+        const error = document.getElementById("errorMsg");
+
+        // Test API key
+        try {
+          const res = await fetch("/api/v1/projects/current", {
+            headers: { "X-API-Key": apiKey },
+          });
+          if (res.ok) {
+            // Guardar en localStorage
+            localStorage.setItem("arcadium_api_key", apiKey);
+            // Redirigir al dashboard
+            window.location.href = "/admin";
+          } else {
+            error.textContent = "API Key inválida";
+            error.style.display = "block";
+          }
+        } catch (e) {
+          error.textContent = "Error conectando con el servidor";
+          error.style.display = "block";
+        }
+      }
+
+      // Auto-login si ya hay API key guardada
+      window.addEventListener("DOMContentLoaded", () => {
+        const saved = localStorage.getItem("arcadium_api_key");
+        if (saved) {
+          document.getElementById("apiKey").value = saved;
+        }
+      });
+    </script>
+  </body>
+</html>
