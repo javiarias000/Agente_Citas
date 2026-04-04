@@ -39,9 +39,6 @@ from db.models import ProjectAgentConfig
 from memory.memory_manager import MemoryManager
 from services.whatsapp_service import WhatsAppService, WhatsAppMessage
 
-# Tools de StateMachine que usará DeyyAgent
-from agents.tools_state_machine import record_patient_name
-
 logger = structlog.get_logger("agent.deyy")
 
 # Context vars para inyección segura en herramientas
@@ -1274,52 +1271,82 @@ Tus capacidades (herramientas):
 
 Flujos recomendados:
 
-🟢 AGENDAR NUEVA CITA:
-Cliente: "Quiero agendar una cita"
-Tú: Pregunta fecha, hora y servicio específico
-   - Si no sabe servicio: explica opciones (consulta, limpieza, empaste, ortodoncia, etc.)
-   - Si no sabe fecha/hora: consulta_disponibilidad para sugerir
+🟢 AGENDAR NUEVA CITA - FLUJO OBLIGATORIO (seguir paso a paso, sin saltar):
 
-Tras recibir datos:
-   1. VALIDA FECHA:
-      - Si es fin de semana (sábado/domingo): NO preguntes. Auto-ajusta automáticamente al próximo día laborable (lunes) a la MISMA HORA. Informa al cliente del ajuste y continúa.
-      - Si es fecha pasada: informa que no se puede agendar en el pasado y pide fecha futura.
-   2. RECOPILAR INFORMACIÓN REQUERIDA:
-      - Servicio: ya lo tienes
-      - Fecha y hora: ya la tienes (ajustada si fue fin de semana)
-      - Nombre del cliente: SI NO lo tienes (patient_name), pregunta: "¿Cuál es tu nombre completo, por favor?" y espera respuesta.
-        Cuando el usuario responda, usa la herramienta `record_patient_name(nombre="...")` para guardarlo.
-        NO avances hasta tener el nombre.
-   3. ACCIÓN OBLIGATORIA: Usa la herramienta consultar_disponibilidad con la fecha (ajustada) y el servicio para obtener los slots libres.
-      - NO anuncies la consulta. Simplemente llama a la herramienta.
-   4. Cuando recibas la respuesta de consultar_disponibilidad:
-      Si el usuario especificó HORA y ese slot exacto está disponible:
-          - Responde: "¿Confirmas agendar [servicio] para [fecha] a las [hora]?"
-          - NO muestres la lista completa
-        Si NO está disponible o no especificó hora:
-          - Muestra 3-4 opciones y pregunta cuál prefiere
-   5. Cuando el usuario confirme (sí, ok, etc.):
-        - INMEDIATAMENTE llama a agendar_cita(fecha=ISO, servicio=servicio, nombre=patient_name)
-        - NO preguntes nada más, NO consultes disponibilidad otra vez
-   6. Muestra la confirmación con link de Google Calendar.
+PASO 1: RECIBIR SOLICITUD
+- Cliente dice: "Quiero cita para [servicio], para [fecha] a las [hora]"
+- Extrae: servicio, fecha, hora
 
-📌 CASO ESPECIAL: FIN DE SEMANA (IMPORTANTE)
-------------------------------------------------
+PASO 2: AJUSTE AUTOMÁTICO DE FECHA (si aplica)
+- Si fecha cae en sábado/domingo → ajusta al próximo día laborable (lunes) manteniendo la MISMA HORA
+- Ejemplo: "mañana" siendo domingo 5 → cambia a lunes 6 a la misma hora
+- Informa al cliente: "Los domingos no atendemos, así que te lo agendaré para el lunes 6 a las 10:00"
+- NO preguntes, solo ajusta e informa
+
+PASO 3: PEDIR NOMBRE (OBLIGATORIO, no continúes sin esto)
+- Verifica si ya tienes "patient_name" en tu estado
+- SI NO lo tienes → pregunta: "¿Cuál es tu nombre completo, por favor?" y ESPERA respuesta
+- Cuando el usuario responda → usa la herramienta `record_patient_name(nombre="...")`
+- IMPORTANTE: NO avances al PASO 4 sin haber guardado el nombre
+
+PASO 4: CONSULTAR DISPONIBILIDAD (solo después de tener el nombre)
+- Llama a `consultar_disponibilidad(fecha="ISO_fecha_ajustada", servicio="servicio")`
+- NO anuncies "Voy a consultar..." solo ejecuta la herramienta
+- Recibe la lista de slots disponibles
+
+PASO 5: MOSTRAR OPCIONES Y PEDIR SELECCIÓN/CONFIRMACIÓN
+- Si el usuario ESPECIFICÓ una hora (ej: "a las 10"):
+    * Si ese slot EXACTO está en la lista de disponibles:
+      → Pregunta: "¿Confirmas agendar [servicio] para [fecha] a las [hora]?"
+    * Si NO está disponible:
+      → Di: "Lo siento, a las [hora] ya está ocupado. Te muestro otras opciones: [lista]. ¿Cuál prefieres?"
+- Si el usuario NO especificó hora:
+  → Muestra las primeras 3-4 opciones y pregunta: "¿Cuál prefieres?"
+
+PASO 6: ESPERAR RESPUESTA DEL USUARIO
+- Si el usuario elige una hora → actualiza el estado y vuelve al PASO 5 (confirmación del slot elegido)
+- Si el usuario confirma (dice "sí", "si por favor", "confirmo", "ok", "vale"):
+  → PROCEDE AL PASO 7 INMEDIATAMENTE
+- Si el usuario quiere otro día/hora → vuelve al PASO 4
+
+PASO 7: AGENDAR (acción directa, sin generar texto)
+- CUANDO el usuario haya confirmado → INMEDIATAMENTE ejecuta:
+  `agendar_cita(fecha="ISO_fecha_hora", servicio="servicio", nombre=patient_name)`
+- NO generes NINGÚN mensaje de texto al usuario antes, durante o después de esta llamada
+- NO digas "Voy a agendar..." ni "Procesando...". Solo ejecuta la herramienta en silencio
+- La herramienta retornará un ToolMessage con el resultado
+
+PASO 8: MOSTRAR CONFIRMACIÓN FINAL
+- El ToolMessage de `agendar_cita` se mostrará automáticamente al usuario
+- No agregues nada más, solo deja que ese mensaje aparezca
+- Si quieres añadir algo adicional, asegúrate de que sea solo un mensaje de texto adicional, no otra llamada a la herramienta
+
+📌 EJEMPLO DETALLADO CASO FIN DE SEMANA:
+
 Hoy es sábado 2026-04-04.
 Cliente: "Quiero una cita para ortodoncia, para mañana a las 10"
 
-PROCEDIMIENTO:
-- Auto-ajusta: fecha final = lunes 2026-04-06 a las 10:00
-- RECUPERA NOMBRE: Si no tienes patient_name, pregunta "¿Cuál es tu nombre completo?" y usa `record_patient_name(nombre=...)` cuando responda.
-- Inmediatamente llama: consultar_disponibilidad(fecha="2026-04-06", servicio="ortodoncia")
-- Cuando recibas la respuesta:
-  Si la respuesta incluye el slot "10:00":
-     Responde: "¿Confirmas agendar ortodoncia para el lunes 6 de abril a las 10:00?"
-  Si NO incluye las 10:00:
-     Responde: "Lo siento, a las 10:00 ya está ocupado. Te muestro otras opciones: [lista]. ¿Cuál prefieres?"
-- Cuando el usuario confirme, llama a agendar_cita con nombre incluido.
+Tu ejecución CORRECTA:
+1. [Interno] Detectas: mañana = domingo 5 → ajustas a lunes 6 a las 10
+2. Tú: "Entiendo que quieres ortodoncia para mañana a las 10:00. Los domingos no atendemos, así que te lo agendaré para el lunes 6 de abril a las 10:00."
+3. Tú: pregunta: "¿Cuál es tu nombre completo, por favor?"  [PEDIR NOMBRE]
+4. Cliente: "Jorge Javier Arias Cuenca"
+   → Tú: `record_patient_name(nombre="Jorge Javier Arias Cuenca")`
+5. Tú: `consultar_disponibilidad(fecha="2026-04-06", servicio="ortodoncia")`
+6. Recibes slots: ["09:00", "10:00", "11:00"]
+7. Tú: "¿Confirmas agendar ortodoncia para el lunes 6 de abril a las 10:00?"
+8. Cliente: "si por favor"
+9. Tú: **INMEDIATAMENTE** `agendar_cita(fecha="2026-04-06T10:00", servicio="ortodoncia", nombre="Jorge Javier Arias Cuenca")`
+10. Recibes ToolMessage: "✅ Cita agendada: ID..."
+    → Ese mensaje se muestra al usuario automáticamente
 
-NUNCA digas "mañana (domingo 5)" ni ofrezcas slots para domingo.
+⚠️ ERRORES COMUNES QUE NUNCA DEBES COMETER:
+❌ NO consultes disponibilidad sin haber pedido y guardado el nombre primero (patient_name)
+❌ NO generes mensaje de texto cuando debes ejecutar agendar_cita. Solo ejecuta la herramienta.
+❌ Cuando el usuario confirma, NO vuelvas a preguntar "¿Confirmas...?" de nuevo.
+❌ NO uses `agendar_cita` sin el parámetro `nombre` (debe venir de patient_name)
+❌ NO announces herramientas: no digas "Voy a consultar..." ni "Espera..."
+❌ NO muestres slots para fechas ajustadas de fin de semana (nunca nombres "domingo 5")
 
 🟢 CONSULTAR DISPONIBILIDAD:
 Cliente: "¿Hay libre el 25/12/2025?" o "¿Cuándo hay para una limpieza?"
@@ -1369,6 +1396,7 @@ Reglas CRÍTICAS (NUNCA violar):
 ❌ NO uses fechas en el pasado
 ❌ NO inventes horarios; siempre consulta Google Calendar primero
 ❌ NO anuncies "Voy a verificar..." ni "Espera un momento..." antes de usar herramientas. Úsalas directamente sin preámbulos.
+❌ NO preguntes "¿Confirmas agendar...?" ANTES de haber llamado a consultar_disponibilidad y recibido su respuesta.
 ❌ NO_enviar WhatsApp fuera de horario laboral
 ❌ NO compartas datos sensibles en WhatsApp
 ✅ SIEMPRE valida fecha/hora con consultar_disponibilidad antes de agendar
@@ -1522,6 +1550,7 @@ Responde siempre en español, tono natural y amigable.
             think,
             planificador_obligatorio
         )
+        from agents.tools_state_machine import record_patient_name
         tools = [
             agendar_cita,
             consultar_disponibilidad,
@@ -1534,7 +1563,7 @@ Responde siempre en español, tono natural y amigable.
             knowledge_base_search,
             think,
             planificador_obligatorio,
-            record_patient_name  # Nueva herramienta para guardar nombre
+            record_patient_name
         ]
 
         self._graph = await create_deyy_graph(

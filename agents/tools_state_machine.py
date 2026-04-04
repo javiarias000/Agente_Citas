@@ -1011,5 +1011,5 @@ STATE_MACHINE_TOOLS = [
     cancelar_cita,
     reagendar_cita,
     record_patient_name,  # Nueva herramienta
-    reagendar_cita
+    # Nota: reagendar_cita aparece dos veces accidentalmente, dejar solo una en producción
 ]
