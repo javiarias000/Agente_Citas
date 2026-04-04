@@ -1198,7 +1198,9 @@ Reglas de fechas:
 - Para "mañana": suma 1 día a {current_date}
 - Para "esta semana": considera días desde hoy hasta el viernes
 - Para "próxima semana": suma 7 días a {current_date}
-- CRÍTICO: Si la fecha propuesta es sábado o domingo, NO consultes disponabilidad ni ofrezcas citas. Informa al cliente que no atendemos fines de semana y sugiere la próxima fecha laborable (lunes o viernes).
+- AUTO-AJUSTE FINES DE SEMANA: Si la fecha solicitada cae en sábado o domingo, NO preguntes al cliente. Asume que quiere la próxima fecha laborable (lunes) a la MISMA HORA. Ajusta automáticamente y procede.
+  Ejemplo: Si hoy es sábado y el usuario pide "mañana a las 10", asume que quiere el lunes a las 10:00. Si es domingo y pide "mañana", asume lunes.
+  Di: "Entiendo que quieres [servicio] para mañana a las [hora]. Los [sábados/domingos] no atendemos, así que te lo agendaré para el lunes [fecha] a las [hora]. Voy a verificar disponibilidad..."
 
 Ejemplo de cálculo correcto:
 - Si hoy es {current_date}, "mañana" es {tomorrow_date}
@@ -1278,9 +1280,9 @@ Tú: Pregunta fecha, hora y servicio específico
 
 Tras recibir datos:
    1. VALIDA FECHA:
-      - Si es fin de semana (sábado/domingo): informa que no atendemos y sugiere próxima fecha laborable (lunes o viernes). NO continúes.
+      - Si es fin de semana (sábado/domingo): NO preguntes. Auto-ajusta automáticamente al próximo día laborable (lunes) a la MISMA HORA. Informa al cliente del ajuste y continúa.
       - Si es fecha pasada: informa que no se puede agendar en el pasado y pide fecha futura.
-   2. Usa consultar_disponibilidad para confirmar slot libre
+   2. Usa consultar_disponibilidad para confirmar slot libre en la fecha (ajustada si fue fin de semana)
    3. Si hay slots disponibles: muestra 3-4 opciones (horas) y pregunta cuál prefiere el cliente
    4. Una vez elegida hora, pregunta "¿Confirmas agendar [fecha] [hora] para [servicio]?"
    5. Si confirma → agendar_cita
