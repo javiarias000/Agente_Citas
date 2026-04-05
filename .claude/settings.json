@@ -1,21 +1,8 @@
 {
 "env": {
     "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
-    "ANTHROPIC_AUTH_TOKEN": "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",
+    "ANTHROPIC_AUTH_TOKEN": "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",
     "ANTHROPIC_API_KEY": "",
-    "ANTHROPIC_MODEL": "stepfun/step-3.5-flash:free"
-  },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jq -r '.tool_input.file_path' | xargs -I {} npx prettier --write {}"
-          }
-        ]
-      }
-    ]
+    "ANTHROPIC_MODEL": "qwen/qwen3.6-plus:free"
   }
 }

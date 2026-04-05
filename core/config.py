@@ -105,6 +105,21 @@ class Settings(BaseSettings):
         description="Habilitar State Machine pattern para DeyyAgent (usa SupportState + middleware)"
     )
 
+    # LangGraph (migración v3.0)
+    USE_LANGGRAPH: bool = Field(
+        default=False,
+        description="Usar ArcadiumAgent (LangGraph) en lugar de DeyyAgent/RouterAgent. "
+                    "Feature flag para migración sin downtime."
+    )
+    LANGGRAPH_MODEL: str = Field(
+        default="gpt-4o-mini",
+        description="Modelo LLM para agentes LangGraph"
+    )
+    LANGGRAPH_TEMPERATURE: float = Field(
+        default=0.5,
+        description="Temperatura del LLM para agentes LangGraph"
+    )
+
     # Logging
     LOG_LEVEL: str = Field(
         default="INFO",

@@ -596,13 +596,11 @@ async def agent_node(
                     state["current_step"] = "scheduler"
                     logger.info("Fallback direct datetime set", fecha=fecha_iso)
 
-        # Fallback 3: En scheduler, si tenemos servicio, fecha, Y NOMBRE, y NO tenemos appointment_id,
-        # y el usuario confirma o pide agendar → FORZAR agendar_cita
-        # Esto rompe el bucle de confirmación
-        if (current_step == "scheduler" and
+        # Fallback 3: En scheduler/info_collector, si tenemos servicio y fecha,
+        # y usuario confirma → FORZAR agendar_cita (rompe bucle)
+        if (current_step in ["scheduler", "info_collector"] and
             state.get("selected_service") is not None and
             state.get("datetime_preference") is not None and
-            state.get("patient_name") is not None and
             state.get("appointment_id") is None and
             user_input):
             text = user_input.lower()
@@ -616,7 +614,7 @@ async def agent_node(
                     text=text[:50],
                     service=state.get("selected_service"),
                     fecha=state.get("datetime_preference"),
-                    nombre=state.get("patient_name")
+                    patient_name=state.get("patient_name")
                 )
                 agendar_tool = next((t for t in tools if t.name == "agendar_cita"), None)
                 if agendar_tool:

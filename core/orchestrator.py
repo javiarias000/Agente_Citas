@@ -120,6 +120,10 @@ class ArcadiumAPI:
         if self.settings.ENABLE_METRICS:
             self._setup_metrics()
 
+        # Inicializar componentes LangGraph si está habilitado
+        if self.settings.USE_LANGGRAPH:
+            await self._init_langgraph()
+
         logger.info("ArcadiumAPI inicializada")
 
     def _setup_metrics(self):
@@ -130,6 +134,52 @@ class ArcadiumAPI:
             logger.info("Métricas Prometheus iniciadas", port=self.settings.METRICS_PORT)
         except ImportError:
             logger.warning("prometheus_client no instalado, métricas deshabilitadas")
+
+    async def _init_langgraph(self) -> None:
+        """Inicializar componentes de LangGraph (LLM, store, graph compilado)."""
+        try:
+            from langchain_openai import ChatOpenAI
+
+            # Store para LangGraph
+            from src.store import PostgresStore
+            self.langgraph_store = PostgresStore(self.db.engine)
+            await self.langgraph_store.initialize()
+
+            # LLM para el agente LangGraph
+            self.langgraph_llm = ChatOpenAI(
+                model=self.settings.LANGGRAPH_MODEL,
+                temperature=self.settings.LANGGRAPH_TEMPERATURE,
+            )
+
+            # Graph compilado (sin servicios de calendario/DB por ahora)
+            from src.graph import compile_graph
+            self.langgraph_graph = compile_graph(
+                llm=self.langgraph_llm,
+                store=self.langgraph_store,
+                calendar_service=getattr(self, "_calendar_service", None),
+                db_service=None,
+            )
+
+            logger.info("LangGraph components inicializados")
+        except Exception as e:
+            logger.error("Error inicializando LangGraph", error=str(e), exc_info=True)
+            raise
+
+    async def _create_langgraph_agent(
+        self,
+        session_id: str,
+        project_id: Optional[uuid.UUID],
+    ) -> Any:
+        """Crea un ArcadiumAgent (LangGraph) para una sesión."""
+        from src.agent import ArcadiumAgent
+
+        agent = ArcadiumAgent(
+            session_id=f"deyy_{session_id}",
+            graph=self.langgraph_graph,
+            store=self.langgraph_store,
+            llm=self.langgraph_llm,
+        )
+        return agent
 
     async def _load_default_project(self) -> None:
         """Carga el proyecto por defecto desde la base de datos"""
@@ -382,7 +432,8 @@ class ArcadiumAPI:
                     "llm": "OpenAI GPT-4o-mini",
                     "memory": "PostgreSQL" if self.settings.USE_POSTGRES_FOR_MEMORY else "In-Memory",
                     "database": "PostgreSQL",
-                    "agent": "DeyyAgent with LangChain",
+                    "agent": "ArcadiumAgent (LangGraph)" if self.settings.USE_LANGGRAPH else "DeyyAgent with LangChain",
+                    "langgraph_active": self.settings.USE_LANGGRAPH,
                     "google_calendar": "enabled" if self.settings.GOOGLE_CALENDAR_ENABLED else "disabled"
                 }
             }
@@ -923,7 +974,18 @@ class ArcadiumAPI:
                             project_config = await self._get_or_create_default_config(project_id, db_session)
 
                 # Elegir tipo de agente basado en feature flag
-                if self.settings.ENABLE_STATE_MACHINE:
+                if self.settings.USE_LANGGRAPH:
+                    # Usar ArcadiumAgent (LangGraph v3.0)
+                    agent = await self._create_langgraph_agent(
+                        session_id=session_id,
+                        project_id=project_id,
+                    )
+                    logger.info(
+                        "ArcadiumAgent (LangGraph) creado y cacheado",
+                        cache_key=cache_key,
+                        total_agents=len(self._agents)
+                    )
+                elif self.settings.ENABLE_STATE_MACHINE:
                     # Usar RouterAgent (nueva arquitectura de agentes especializados)
                     from agents.router_agent import RouterAgent
                     agent = RouterAgent(

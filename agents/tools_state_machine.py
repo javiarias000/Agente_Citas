@@ -437,30 +437,19 @@ async def consultar_disponibilidad(
         if servicio:
             duration = get_service_duration(servicio)
 
-        # Obtener sesión de DB
-        from db import get_async_session
-        session = get_async_session()
-
         # Parsear fecha a datetime
-        from datetime import datetime
-        if isinstance(fecha, str):
-            # Si es YYYY-MM-DD, convertir a datetime
-            if len(fecha) == 10:
-                fecha_dt = datetime.fromisoformat(fecha + "T00:00:00")
-            else:
-                fecha_dt = datetime.fromisoformat(fecha)
-        else:
-            fecha_dt = fecha
+        date = datetime.strptime(fecha, "%Y-%m-%d") if len(fecha) == 10 else datetime.fromisoformat(fecha)
 
-        # Consultar slots
-        slots = await appointment_service.get_available_slots(
-            session=session,
-            date=fecha_dt,
-            duration_minutes=duration
-        )
+        async with get_async_session() as session:
+            # Consultar slots
+            slots = await appointment_service.get_available_slots(
+                session=session,
+                date=date,
+                duration_minutes=duration
+            )
 
-        # Convertir a ISO strings
-        slot_strings = [slot.start.isoformat() for slot in slots]
+            # Convertir a ISO strings
+            slot_strings = [slot.start.isoformat() for slot in slots]
 
         logger.info(
             "Disponibilidad consultada",
@@ -551,6 +540,19 @@ async def agendar_cita(
             }
         )
 
+    if not phone:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Error: No se pudo determinar el número de teléfono del cliente.",
+                        tool_call_id=runtime.tool_call_id
+                    )
+                ],
+                "errors_encountered": add_error(state, "phone_missing"),
+            }
+        )
+
     try:
         appointment_service = _get_appointment_service_from_runtime(runtime)
 
@@ -564,16 +566,17 @@ async def agendar_cita(
             metadata["client_name"] = nombre
 
         # Crear cita
-        project_id = state.get("project_id")  # Puede ser None para modo legacy
-        success, message, appointment = await appointment_service.create_appointment(
-            session=get_async_session(),
-            phone_number=phone or "+0000000000",  # TODO: obtener phone real
-            appointment_datetime=dt,
-            service_type=servicio,
-            project_id=project_id,
-            notes=notas,
-            metadata=metadata
-        )
+        project_id = state.get("project_id")
+        async with get_async_session() as session:
+            success, message, appointment = await appointment_service.create_appointment(
+                session=session,
+                phone_number=phone,
+                appointment_datetime=dt,
+                service_type=servicio,
+                project_id=project_id,
+                notes=notas,
+                metadata=metadata
+            )
 
         if success and appointment:
             logger.info(
@@ -646,18 +649,32 @@ async def cancelar_cita(
         Command con confirmación y transición a 'reception' si éxito.
     """
     state = runtime.state
-    phone = get_current_phone()
+    try:
+        phone = get_current_phone()
+    except ValueError:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Error: No se pudo determinar el número de teléfono del cliente.",
+                        tool_call_id=runtime.tool_call_id
+                    )
+                ],
+                "errors_encountered": add_error(state, "phone_missing"),
+            }
+        )
 
     try:
         appointment_service = _get_appointment_service_from_runtime(runtime)
 
         # Si no hay ID, buscar próxima cita
         if not appointment_id:
-            citas = await appointment_service.get_appointments_by_phone(
-                session=get_async_session(),
-                phone_number=phone or "",
-                upcoming_only=True
-            )
+            async with get_async_session() as session:
+                citas = await appointment_service.get_appointments_by_phone(
+                    session=session,
+                    phone_number=phone,
+                    upcoming_only=True
+                )
             if not citas:
                 return Command(
                     update={
@@ -745,18 +762,32 @@ async def reagendar_cita(
         Command con resultado y transición.
     """
     state = runtime.state
-    phone = get_current_phone()
+    try:
+        phone = get_current_phone()
+    except ValueError:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Error: No se pudo determinar el número de teléfono del cliente.",
+                        tool_call_id=runtime.tool_call_id
+                    )
+                ],
+                "errors_encountered": add_error(state, "phone_missing"),
+            }
+        )
 
     try:
         appointment_service = _get_appointment_service_from_runtime(runtime)
 
         # Determinar qué cita reagendar
         if not appointment_id:
-            citas = await appointment_service.get_appointments_by_phone(
-                session=get_async_session(),
-                phone_number=phone or "",
-                upcoming_only=True
-            )
+            async with get_async_session() as session:
+                citas = await appointment_service.get_appointments_by_phone(
+                    session=session,
+                    phone_number=phone,
+                    upcoming_only=True
+                )
             if not citas:
                 return Command(
                     update={
@@ -879,15 +910,19 @@ async def obtener_citas_cliente(
     Returns:
         Dict con lista de citas.
     """
-    phone = get_current_phone()  # TODO: obtener de contextvars
+    try:
+        phone = get_current_phone()
+    except ValueError:
+        phone = ""
 
     try:
         appointment_service = _get_appointment_service_from_runtime(runtime)
-        citas = await appointment_service.get_appointments_by_phone(
-            session=get_async_session(),
-            phone_number=phone or "",
-            upcoming_only=not historico  # Si historico=True, upcoming_only=False
-        )
+        async with get_async_session() as session:
+            citas = await appointment_service.get_appointments_by_phone(
+                session=session,
+                phone_number=phone,
+                upcoming_only=not historico
+            )
 
         result = {
             "citas": [
@@ -963,8 +998,9 @@ def _get_appointment_service_from_runtime(runtime: Any) -> AppointmentService:
 
 
 @tool
-async def record_patient_name(
-    nombre: str = Field(description="Nombre completo del cliente")
+def record_patient_name(
+    nombre: Annotated[str, Field(description="Nombre completo del cliente")],
+    runtime: Any,
 ) -> Command:
     """
     Guarda el nombre del paciente en el estado de la conversación.
@@ -977,24 +1013,26 @@ async def record_patient_name(
     Returns:
         Command con actualización de patient_name en el estado.
     """
-    # Obtener phone y project_id del contexto (como en deyy_agent)
     try:
         phone = get_current_phone()
-        project_id = get_current_project_id()
     except ValueError:
         phone = None
-        project_id = None
 
     logger.info(
         "Guardando nombre del paciente",
         nombre=nombre,
-        phone=phone
+        phone=phone,
     )
 
-    # Guardar en estado (StateMachine)
     return Command(
         update={
-            "patient_name": nombre
+            "messages": [
+                ToolMessage(
+                    content=f"Nombre registrado: {nombre}",
+                    tool_call_id=runtime.tool_call_id,
+                )
+            ],
+            "patient_name": nombre,
         }
     )
 

@@ -1,0 +1,215 @@
+"""
+Constructor del grafo LangGraph completo.
+
+Conecta todos los nodos, edges, y dependencias en un StateGraph compilado.
+"""
+
+from __future__ import annotations
+
+from functools import partial
+from typing import Any, Dict
+
+import structlog
+from langgraph.graph import END, START, StateGraph
+
+logger = structlog.get_logger("langgraph.graph")
+
+
+def build_graph(
+    llm: Any,
+    store: Any = None,
+    calendar_service: Any = None,
+    db_service: Any = None,
+) -> StateGraph:
+    """
+    Construye el StateGraph de Arcadium con todos los nodos y routing.
+
+    Args:
+        llm: ChatOpenAI (o compatible)
+        store: BaseStore (PostgresStore o InMemoryStore)
+        calendar_service: GoogleCalendarService wrapper
+        db_service: AppointmentService
+    """
+    from src.state import ArcadiumState
+
+    # Importar nodos y edges
+    from src.nodes import (
+        node_entry,
+        node_route_intent,
+        node_extract_intent,
+        node_check_missing,
+        node_extract_data,
+        node_adjust_weekend,
+        node_check_availability,
+        node_detect_confirmation,
+        node_validate_and_confirm,
+        node_book_appointment,
+        node_cancel_appointment,
+        node_generate_response,
+        node_save_state,
+    )
+    from src.edges import (
+        edge_after_route_intent,
+        edge_after_check_missing,
+        edge_after_confirm,
+        edge_after_extract_data,
+        edge_after_adjust_weekend,
+        edge_after_validate,
+        edge_should_escalate,
+    )
+
+    # ── Crear graph ──────────────────────────────────────────
+    graph = StateGraph(ArcadiumState)
+
+    # ── Nodos deterministas ──────────────────────────────────
+
+    graph.add_node("entry", partial(node_entry, store=store))
+    graph.add_node("route_intent", node_route_intent)
+    graph.add_node("check_missing", node_check_missing)
+    graph.add_node("adjust_weekend", node_adjust_weekend)
+    graph.add_node(
+        "check_availability",
+        partial(node_check_availability, calendar_service=calendar_service),
+    )
+    graph.add_node("detect_confirmation", node_detect_confirmation)
+    graph.add_node("validate_and_confirm", node_validate_and_confirm)
+    graph.add_node(
+        "book_appointment",
+        partial(
+            node_book_appointment,
+            calendar_service=calendar_service,
+            db_service=db_service,
+        ),
+    )
+    graph.add_node(
+        "cancel_appointment",
+        partial(node_cancel_appointment, db_service=db_service),
+    )
+    graph.add_node("save_state", partial(node_save_state, store=store))
+
+    # ── Nodos LLM ─────────────────────────────────────────────
+    graph.add_node("extract_intent", partial(node_extract_intent, llm=llm))
+    graph.add_node("extract_data", partial(node_extract_data, llm=llm))
+    graph.add_node("generate_response", partial(node_generate_response, llm=llm))
+
+    # ── Edges: entrada siempre → entry ───────────────────────
+    graph.add_edge(START, "entry")
+
+    # entry → route_intent (siempre)
+    graph.add_edge("entry", "route_intent")
+
+    # route_intent → routing edge
+    graph.add_conditional_edges(
+        "route_intent",
+        edge_after_route_intent,
+        {
+            "extract_intent": "extract_intent",
+            "check_missing": "check_missing",
+            "check_availability": "check_availability",
+            "handle_modification": "detect_confirmation",
+            "generate_response": "generate_response",
+        },
+    )
+
+    # extract_intent → check_missing (ya se determinó el intent, ahora verificar datos)
+    graph.add_edge("extract_intent", "check_missing")
+
+    # check_missing → routing
+    graph.add_conditional_edges(
+        "check_missing",
+        edge_after_check_missing,
+        {
+            "extract_data": "extract_data",
+            "check_availability": "check_availability",
+            "generate_response": "generate_response",
+        },
+    )
+
+    # extract_data → routing
+    graph.add_conditional_edges(
+        "extract_data",
+        edge_after_extract_data,
+        {
+            "adjust_weekend": "adjust_weekend",
+            "check_missing": "check_missing",
+            "generate_response": "generate_response",
+        },
+    )
+
+    # adjust_weekend → check_missing (re-evaluar después del ajuste)
+    graph.add_conditional_edges(
+        "adjust_weekend",
+        edge_after_adjust_weekend,
+        {
+            "check_missing": "check_missing",
+        },
+    )
+
+    # check_availability → generate_response (mostrar slots)
+    graph.add_edge("check_availability", "generate_response")
+
+    # generate_response → save_state → luego el siguiente mensaje del usuario
+    # entra de nuevo por entry, que lleva a detect_confirmation si hay contexto
+    graph.add_edge("generate_response", "save_state")
+    graph.add_edge("save_state", END)
+
+    # --- Para el segundo turno (confirmación, re-entrada) ---
+    # detect_confirmation → routing
+    graph.add_conditional_edges(
+        "detect_confirmation",
+        edge_after_confirm,
+        {
+            "book_appointment": "book_appointment",
+            "cancel_appointment": "cancel_appointment",
+            "validate_slot": "validate_and_confirm",
+            "generate_response": "generate_response",
+        },
+    )
+
+    # validate_and_confirm → generate_response
+    graph.add_edge("validate_and_confirm", "generate_response")
+
+    # book_appointment → generate_response (confirmación de éxito)
+    graph.add_edge("book_appointment", "generate_response")
+
+    # cancel_appointment → generate_response (confirmación de cancelación)
+    graph.add_edge("cancel_appointment", "generate_response")
+
+    # ── Escalation check (opcional) ──────────────────────────
+    # No se agrega como conditional edge en el graph principal
+    # porque el grafo siempre termina en save_state → END.
+    # La lógica de escalación se evalúa en save_state y
+    # generate_response genera el mensaje "Voy a pasarle con alguien".
+
+    logger.info("Graph de Arcadium construido")
+
+    return graph
+
+
+def compile_graph(
+    llm=None,
+    store=None,
+    calendar_service=None,
+    db_service=None,
+    checkpointer=None,
+):
+    """
+    Construye y compila el grafo con checkpointer.
+
+    Returns:
+        CompiledGraph listo para invoke/ainvoke.
+    """
+    graph = build_graph(
+        llm=llm,
+        store=store,
+        calendar_service=calendar_service,
+        db_service=db_service,
+    )
+
+    if checkpointer:
+        compiled = graph.compile(checkpointer=checkpointer)
+    else:
+        compiled = graph.compile()
+
+    logger.info("Graph de Arcadium compilado")
+    return compiled

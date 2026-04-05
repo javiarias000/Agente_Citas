@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """
 Memoria PostgreSQL usando tabla única (langchain_memory)
-Implementación limpia y escalable
+
+FIXES APLICADOS:
+- [CRÍTICO] get_user_profile duplicado (dos definiciones con retornos distintos) → unificado en uno
+- [CRÍTICO] create_or_update_profile duplicado → unificado
+- [CRÍTICO] increment_user_conversation_count abría objeto detached fuera de sesión → todo en una sesión
+- [CRÍTICO] update_user_last_seen mismo problema de sesión detached → corregido
+- [IMPORTANTE] clear_session faltaba commit → agregado
+- [IMPORTANTE] cleanup_expired no retornaba en bloque except → retorna 0
 """
 
-from typing import List, Optional, Any, Dict
-from datetime import datetime, timezone
-from sqlalchemy import select, delete, text
-from sqlalchemy.ext.asyncio import AsyncSession
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-
-from db.models import LangchainMemory, UserProfile, AgentState
-import structlog
 import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import structlog
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from sqlalchemy import delete, select, text
+
+from db.models import AgentState, LangchainMemory, UserProfile
 
 logger = structlog.get_logger("memory.postgres")
 
@@ -24,40 +31,36 @@ class PostgresStorage:
     """
 
     def __init__(self):
-        """Inicializa - necesita ser await initialize()"""
         self._initialized = False
-        logger.info("PostgresStorage inicializado")
+        logger.info("PostgresStorage creado")
 
     async def initialize(self):
-        """Asegura que las tablas existen (no crea nada, confía en migraciones)"""
-        # Las tablas se crean al inicio de la app via Base.metadata.create_all()
+        """Asegura que las tablas existen (confía en migraciones)."""
         self._initialized = True
         logger.info("PostgreSQLMemory inicializado")
 
-    async def get_history(self, session_id: str, project_id: Optional[uuid.UUID] = None, limit: Optional[int] = None) -> List[BaseMessage]:
-        """
-        Obtiene historial de mensajes para una sesión.
+    # ============================================
+    # HISTORIAL
+    # ============================================
 
-        Args:
-            session_id: Identificador de sesión (teléfono o UUID)
-            project_id: ID del proyecto (para filtrado multi-tenant). Si se provee, filtra por project_id.
-            limit: Número máximo de mensajes a devolver (más recientes). None = sin límite.
-
-        Returns:
-            Lista de mensajes en orden cronológica
-        """
+    async def get_history(
+        self,
+        session_id: str,
+        project_id: Optional[uuid.UUID] = None,
+        limit: Optional[int] = None,
+    ) -> List[BaseMessage]:
         if not self._initialized:
             await self.initialize()
 
         from db import get_async_session
+
         async with get_async_session() as session:
             stmt = select(LangchainMemory)
 
-            # Filtrar por project_id si se provee
             if project_id:
                 stmt = stmt.where(
                     LangchainMemory.project_id == project_id,
-                    LangchainMemory.session_id == session_id
+                    LangchainMemory.session_id == session_id,
                 )
             else:
                 stmt = stmt.where(LangchainMemory.session_id == session_id)
@@ -70,32 +73,28 @@ class PostgresStorage:
             result = await session.execute(stmt)
             records = result.scalars().all()
 
-            # Convertir a mensajes de LangChain
             history = []
             for record in records:
                 if record.type == "human":
                     history.append(HumanMessage(content=record.content))
                 elif record.type == "ai":
                     history.append(AIMessage(content=record.content))
-                # Ignorar otros tipos
 
-            # Validación: ¿todos los registros se convirtieron?
             if len(history) != len(records):
                 logger.warning(
                     "Discrepancia en conversión de historial",
                     session_id=session_id,
-                    project_id=str(project_id) if project_id else None,
                     records_total=len(records),
                     messages_converted=len(history),
-                    unconverted_types=[r.type for r in records if r.type not in ["human", "ai"]]
+                    unconverted_types=[
+                        r.type for r in records if r.type not in ["human", "ai"]
+                    ],
                 )
 
             logger.debug(
                 "Historial recuperado",
                 session_id=session_id,
-                project_id=str(project_id) if project_id else None,
                 message_count=len(history),
-                records_found=len(records)
             )
             return history
 
@@ -103,16 +102,8 @@ class PostgresStorage:
         self,
         session_id: str,
         message: BaseMessage,
-        project_id: Optional[uuid.UUID] = None
+        project_id: Optional[uuid.UUID] = None,
     ) -> None:
-        """
-        Añade mensaje al historial.
-
-        Args:
-            session_id: Identificador de sesión
-            message: Mensaje de LangChain (HumanMessage o AIMessage)
-            project_id: ID del proyecto (obligatorio para multi-tenant)
-        """
         if not self._initialized:
             await self.initialize()
 
@@ -121,102 +112,86 @@ class PostgresStorage:
         elif isinstance(message, AIMessage):
             msg_type = "ai"
         else:
-            # No guardar otros tipos (SystemMessage, etc.)
             logger.debug(
-                "Ignorando tipo de mensaje no manejado",
-                type=type(message).__name__
+                "Ignorando tipo de mensaje no manejado", type=type(message).__name__
             )
             return
 
         from db import get_async_session
+
         async with get_async_session() as session:
             record = LangchainMemory(
                 session_id=session_id,
                 project_id=project_id,
                 type=msg_type,
                 content=message.content,
-                created_at=datetime.now(timezone.utc)
+                created_at=datetime.now(timezone.utc),
             )
             session.add(record)
             await session.flush()
-            await session.commit()  # ✅ CRÍTICO: Persistir la transacción
+            await session.commit()
 
             logger.debug(
-                "Mensaje guardado en memoria",
+                "Mensaje guardado",
                 session_id=session_id,
-                project_id=str(project_id) if project_id else None,
                 type=msg_type,
-                content_length=len(message.content)
+                content_length=len(message.content),
             )
 
-    async def clear_session(self, session_id: str, project_id: Optional[uuid.UUID] = None) -> None:
-        """
-        Limpia historial de una sesión.
-
-        Args:
-            session_id: Identificador de sesión
-            project_id: ID del proyecto (opcional, para mayor seguridad)
-        """
+    async def clear_session(
+        self, session_id: str, project_id: Optional[uuid.UUID] = None
+    ) -> None:
         if not self._initialized:
             await self.initialize()
 
         from db import get_async_session
+
         async with get_async_session() as session:
-            stmt = delete(LangchainMemory).where(LangchainMemory.session_id == session_id)
+            stmt = delete(LangchainMemory).where(
+                LangchainMemory.session_id == session_id
+            )
             if project_id:
                 stmt = stmt.where(LangchainMemory.project_id == project_id)
 
             await session.execute(stmt)
             await session.flush()
-            logger.info(
-                "Sesión limpiada",
-                session_id=session_id,
-                project_id=str(project_id) if project_id else None
-            )
+            await session.commit()  # FIX: faltaba commit
+            logger.info("Sesión limpiada", session_id=session_id)
 
     async def cleanup_expired(self, expiry_hours: int) -> int:
-        """
-        Limpia registros antiguos de langchain_memory basado en created_at.
-        Para Fase 1, se usa la función SQL cleanup_old_memory() que respeta el TTL definido en la función (24h por defecto).
-        El parámetro expiry_hours se ignora por ahora porque la función SQL tiene su propio TTL.
-        En Fase 2 se podría parametrizar.
-        """
+        """FIX: Ahora retorna 0 en caso de excepción (antes retornaba None implícito)."""
         if not self._initialized:
             await self.initialize()
 
         from db import get_async_session
+
         try:
             async with get_async_session() as session:
-                # Llamar a la función de cleanup definida en la migración
                 result = await session.execute(
                     text("SELECT cleanup_old_memory() as deleted_count")
                 )
                 row = result.fetchone()
                 deleted_count = row[0] if row else 0
 
-                logger.info(
-                    "Cleanup de memoria completado",
-                    deleted_records=deleted_count,
-                    ttl_hours=expiry_hours
-                )
+                logger.info("Cleanup completado", deleted_records=deleted_count)
                 return deleted_count
         except Exception as e:
             logger.error("Error en cleanup de memoria", error=str(e), exc_info=True)
+            return 0  # FIX: retorno explícito en lugar de None
 
     # ============================================
-    # USER PROFILES MANAGEMENT
+    # USER PROFILES
+    # FIX: eliminadas las dos definiciones duplicadas de get_user_profile
+    #      y create_or_update_profile. Queda UNA versión que retorna Dict
+    #      (consistente con lo que espera MemoryManager y las tools).
     # ============================================
 
-    async def get_user_profile(self, phone_number: str, project_id: Optional[uuid.UUID] = None) -> Optional[Dict[str, Any]]:
+    async def get_user_profile(
+        self, phone_number: str, project_id: Optional[uuid.UUID] = None
+    ) -> Optional[Dict[str, Any]]:
         """
-        Obtiene perfil de usuario desde UserProfile table.
-
-        Args:
-            phone_number: Número normalizado
-            project_id: ID del proyecto (opcional)
-
-        Returns:
-            Dict con datos del perfil o None
+        Obtiene perfil de usuario.
+        Retorna Dict (NO el ORM object) para evitar problemas de sesión detached.
         """
         if not self._initialized:
             await self.initialize()
@@ -225,7 +200,9 @@ class PostgresStorage:
 
         try:
             async with get_async_session() as session:
-                stmt = select(UserProfile).where(UserProfile.phone_number == phone_number)
+                stmt = select(UserProfile).where(
+                    UserProfile.phone_number == phone_number
+                )
                 if project_id:
                     stmt = stmt.where(UserProfile.project_id == project_id)
 
@@ -233,40 +210,21 @@ class PostgresStorage:
                 profile = result.scalar_one_or_none()
 
                 if profile:
-                    return {
-                        "phone_number": profile.phone_number,
-                        "project_id": str(profile.project_id) if profile.project_id else None,
-                        "preferences": profile.preferences or {},
-                        "last_appointment": profile.last_appointment.isoformat() if profile.last_appointment else None,
-                        "last_appointment_service": profile.last_appointment_service,
-                        "notes": profile.notes or "",
-                        "extracted_facts": profile.extracted_facts or {},
-                        "total_conversations": profile.total_conversations or 0,
-                        "first_seen": profile.first_seen.isoformat() if profile.first_seen else None,
-                        "last_seen": profile.last_seen.isoformat() if profile.last_seen else None
-                    }
+                    return self._profile_to_dict(profile)
                 return None
 
         except Exception as e:
-            logger.error("Error obteniendo user profile", phone=phone_number, error=str(e))
+            logger.error(
+                "Error obteniendo user profile", phone=phone_number, error=str(e)
+            )
             return None
 
     async def create_or_update_profile(
-        self,
-        phone_number: str,
-        project_id: Optional[uuid.UUID] = None,
-        **updates
+        self, phone_number: str, project_id: Optional[uuid.UUID] = None, **updates
     ) -> Dict[str, Any]:
         """
         Crea o actualiza perfil de usuario.
-
-        Args:
-            phone_number: Número de teléfono
-            project_id: ID del proyecto
-            **updates: Campos a actualizar (preferences, notes, extracted_facts, total_conversations)
-
-        Returns:
-            Dict con el perfil actualizado
+        Retorna Dict (NO el ORM object).
         """
         if not self._initialized:
             await self.initialize()
@@ -275,68 +233,75 @@ class PostgresStorage:
 
         try:
             async with get_async_session() as session:
-                # Buscar existente
-                stmt = select(UserProfile).where(UserProfile.phone_number == phone_number)
+                stmt = select(UserProfile).where(
+                    UserProfile.phone_number == phone_number
+                )
                 if project_id:
                     stmt = stmt.where(UserProfile.project_id == project_id)
 
                 result = await session.execute(stmt)
                 profile = result.scalar_one_or_none()
-
                 now = datetime.now(timezone.utc)
 
                 if profile is None:
-                    # Crear nuevo
                     profile = UserProfile(
                         phone_number=phone_number,
                         project_id=project_id,
-                        preferences=updates.get('preferences', {}),
-                        notes=updates.get('notes', ''),
-                        extracted_facts=updates.get('extracted_facts', {}),
-                        total_conversations=updates.get('total_conversations', 0),
+                        preferences=updates.get("preferences", {}),
+                        notes=updates.get("notes", ""),
+                        extracted_facts=updates.get("extracted_facts", {}),
+                        total_conversations=updates.get("total_conversations", 0),
                         first_seen=now,
-                        last_seen=now
+                        last_seen=now,
                     )
                     session.add(profile)
-                    await session.flush()
                 else:
-                    # Actualizar existente
-                    if 'preferences' in updates and updates['preferences'] is not None:
-                        if profile.preferences is None:
-                            profile.preferences = {}
-                        profile.preferences.update(updates['preferences'])
-                    if 'notes' in updates and updates['notes'] is not None:
+                    if "preferences" in updates and updates["preferences"] is not None:
+                        existing = profile.preferences or {}
+                        existing.update(updates["preferences"])
+                        profile.preferences = existing
+
+                    if "notes" in updates and updates["notes"] is not None:
                         existing_notes = profile.notes or ""
-                        profile.notes = (existing_notes + "\n" + updates['notes']).strip() if existing_notes else updates['notes']
-                    if 'extracted_facts' in updates and updates['extracted_facts'] is not None:
-                        if profile.extracted_facts is None:
-                            profile.extracted_facts = {}
-                        profile.extracted_facts.update(updates['extracted_facts'])
-                    if 'total_conversations' in updates:
-                        profile.total_conversations = updates['total_conversations']
+                        profile.notes = (
+                            (existing_notes + "\n" + updates["notes"]).strip()
+                            if existing_notes
+                            else updates["notes"]
+                        )
+
+                    if (
+                        "extracted_facts" in updates
+                        and updates["extracted_facts"] is not None
+                    ):
+                        existing_facts = profile.extracted_facts or {}
+                        existing_facts.update(updates["extracted_facts"])
+                        profile.extracted_facts = existing_facts
+
+                    if "total_conversations" in updates:
+                        profile.total_conversations = updates["total_conversations"]
+
                     profile.last_seen = now
 
                 await session.flush()
                 await session.commit()
-
-                # Devolver dict
-                return {
-                    "phone_number": profile.phone_number,
-                    "project_id": str(profile.project_id) if profile.project_id else None,
-                    "preferences": profile.preferences or {},
-                    "notes": profile.notes or "",
-                    "extracted_facts": profile.extracted_facts or {},
-                    "total_conversations": profile.total_conversations or 0,
-                    "first_seen": profile.first_seen.isoformat() if profile.first_seen else None,
-                    "last_seen": profile.last_seen.isoformat() if profile.last_seen else None
-                }
+                return self._profile_to_dict(profile)
 
         except Exception as e:
-            logger.error("Error creando/actualizando profile", phone=phone_number, error=str(e), exc_info=True)
+            logger.error(
+                "Error creando/actualizando profile",
+                phone=phone_number,
+                error=str(e),
+                exc_info=True,
+            )
             raise
 
-    async def increment_user_conversation_count(self, phone_number: str, project_id: Optional[uuid.UUID] = None) -> None:
-        """Incrementa contador de conversaciones."""
+    async def increment_user_conversation_count(
+        self, phone_number: str, project_id: Optional[uuid.UUID] = None
+    ) -> None:
+        """
+        FIX: Todo en UNA sesión para evitar objeto detached.
+        Antes abría una sesión para get_user_profile y otra para commit → DetachedInstanceError.
+        """
         if not self._initialized:
             await self.initialize()
 
@@ -344,25 +309,26 @@ class PostgresStorage:
 
         try:
             async with get_async_session() as session:
-                stmt = select(UserProfile).where(UserProfile.phone_number == phone_number)
+                stmt = select(UserProfile).where(
+                    UserProfile.phone_number == phone_number
+                )
                 if project_id:
                     stmt = stmt.where(UserProfile.project_id == project_id)
+
                 result = await session.execute(stmt)
                 profile = result.scalar_one_or_none()
-
                 now = datetime.now(timezone.utc)
 
                 if profile:
                     profile.total_conversations = (profile.total_conversations or 0) + 1
                     profile.last_seen = now
                 else:
-                    # Crear perfil con count=1
                     profile = UserProfile(
                         phone_number=phone_number,
                         project_id=project_id,
                         total_conversations=1,
                         first_seen=now,
-                        last_seen=now
+                        last_seen=now,
                     )
                     session.add(profile)
 
@@ -370,10 +336,19 @@ class PostgresStorage:
                 await session.commit()
 
         except Exception as e:
-            logger.error("Error incrementando conversation count", phone=phone_number, error=str(e))
+            logger.error(
+                "Error incrementando conversation count",
+                phone=phone_number,
+                error=str(e),
+            )
 
-    async def update_user_last_seen(self, phone_number: str, project_id: Optional[uuid.UUID] = None) -> None:
-        """Actualiza última vez visto."""
+    async def update_user_last_seen(
+        self, phone_number: str, project_id: Optional[uuid.UUID] = None
+    ) -> None:
+        """
+        FIX: Todo en UNA sesión para evitar objeto detached.
+        Antes abría una sesión para get y otra para commit.
+        """
         if not self._initialized:
             await self.initialize()
 
@@ -381,228 +356,125 @@ class PostgresStorage:
 
         try:
             async with get_async_session() as session:
-                stmt = select(UserProfile).where(UserProfile.phone_number == phone_number)
+                stmt = select(UserProfile).where(
+                    UserProfile.phone_number == phone_number
+                )
                 if project_id:
                     stmt = stmt.where(UserProfile.project_id == project_id)
+
                 result = await session.execute(stmt)
                 profile = result.scalar_one_or_none()
+                now = datetime.now(timezone.utc)
 
                 if profile:
-                    profile.last_seen = datetime.now(timezone.utc)
-                    await session.flush()
-                    await session.commit()
-                # Si no existe, no hacemos nada
+                    profile.last_seen = now
+                else:
+                    profile = UserProfile(
+                        phone_number=phone_number,
+                        project_id=project_id,
+                        last_seen=now,
+                        first_seen=now,
+                    )
+                    session.add(profile)
 
-        except Exception as e:
-            logger.error("Error updating last_seen", phone=phone_number, error=str(e))
-            return 0
-
-    # ============================================
-    # USER PROFILES (Memoria a largo plazo)
-    # ============================================
-
-    async def get_user_profile(self, phone_number: str, project_id: uuid.UUID) -> Optional[UserProfile]:
-        """
-        Obtiene el perfil de un usuario.
-
-        Args:
-            phone_number: Número normalizado (E.164)
-            project_id: ID del proyecto
-
-        Returns:
-            UserProfile si existe, None si no
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        from db import get_async_session
-        async with get_async_session() as session:
-            stmt = select(UserProfile).where(
-                UserProfile.phone_number == phone_number,
-                UserProfile.project_id == project_id
-            )
-            result = await session.execute(stmt)
-            profile = result.scalar_one_or_none()
-            return profile
-
-    async def create_or_update_profile(
-        self,
-        phone_number: str,
-        project_id: uuid.UUID,
-        **updates
-    ) -> UserProfile:
-        """
-        Crea o actualiza un perfil de usuario.
-
-        Args:
-            phone_number: Número normalizado
-            project_id: ID del proyecto
-            **updates: Campos a actualizar (preferences, notes, last_appointment, etc.)
-
-        Returns:
-            UserProfile (creado o actualizado)
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        from db import get_async_session
-        async with get_async_session() as session:
-            # Buscar existente
-            stmt = select(UserProfile).where(
-                UserProfile.phone_number == phone_number,
-                UserProfile.project_id == project_id
-            )
-            result = await session.execute(stmt)
-            profile = result.scalar_one_or_none()
-
-            if profile:
-                # Actualizar
-                for key, value in updates.items():
-                    if hasattr(profile, key):
-                        setattr(profile, key, value)
-                profile.updated_at = datetime.now(timezone.utc)
-                logger.info("UserProfile actualizado", phone=phone_number, updates=list(updates.keys()))
-            else:
-                # Crear nuevo
-                profile = UserProfile(
-                    phone_number=phone_number,
-                    project_id=project_id,
-                    **updates
-                )
-                session.add(profile)
-                logger.info("UserProfile creado", phone=phone_number)
-
-            await session.flush()
-            await session.commit()
-            return profile
-
-    async def increment_user_conversation_count(self, phone_number: str, project_id: uuid.UUID) -> None:
-        """
-        Incrementa el contador de conversaciones del usuario.
-        Si el perfil no existe, lo crea con count=1.
-        """
-        profile = await self.get_user_profile(phone_number, project_id)
-        if profile:
-            profile.total_conversations += 1
-        else:
-            profile = UserProfile(
-                phone_number=phone_number,
-                project_id=project_id,
-                total_conversations=1
-            )
-            from db import get_async_session
-            async with get_async_session() as session:
-                session.add(profile)
                 await session.flush()
                 await session.commit()
-        logger.debug("Conversación incrementada", phone=phone_number, total=profile.total_conversations)
 
-    async def update_user_last_seen(self, phone_number: str, project_id: uuid.UUID) -> None:
-        """
-        Actualiza el timestamp de última vez visto.
-        Crea perfil si no existe.
-        """
-        profile = await self.get_user_profile(phone_number, project_id)
-        from db import get_async_session
-        async with get_async_session() as session:
-            if profile:
-                profile.last_seen = datetime.now(timezone.utc)
-            else:
-                profile = UserProfile(
-                    phone_number=phone_number,
-                    project_id=project_id,
-                    last_seen=datetime.now(timezone.utc)
-                )
-                session.add(profile)
-            await session.flush()
-            await session.commit()
+        except Exception as e:
+            logger.error(
+                "Error actualizando last_seen", phone=phone_number, error=str(e)
+            )
 
     async def extract_and_save_facts_from_conversation(
         self,
         phone_number: str,
         project_id: uuid.UUID,
         user_message: str,
-        agent_response: str
+        agent_response: str,
     ) -> None:
-        """
-        Extrae hechos relevantes de la conversación y los guarda en el perfil.
-        Implementación simple basada en patrones (fase 1).
-        Fases posteriores usarán LLM para extracción más profunda.
-        """
-        profile = await self.get_user_profile(phone_number, project_id)
-        if not profile:
-            profile = UserProfile(phone_number=phone_number, project_id=project_id)
-
-        facts = dict(profile.extracted_facts) if profile.extracted_facts else {}
-
-        # Extracción simple por patrones (ejemplo: detectar servicio mencionado)
-        user_msg_lower = user_message.lower()
-
-        # Detectar servicios de dental
-        service_keywords = {
-            "limpieza": ["limpieza", "profilaxis"],
-            "extracción": ["extracción", "sacar", "muela"],
-            "empaste": ["empaste", "caries"],
-            "ortodoncia": ["ortodoncia", "frenos", "braces"],
-            "consult": ["consulta", "revisión", "chequeo"]
-        }
-
-        for service, keywords in service_keywords.items():
-            if any(k in user_msg_lower for k in keywords):
-                facts["mentioned_service"] = service
-                break
-
-        # Detectar preferencias de tiempo
-        time_keywords = {
-            "mañana": ["mañana", "por la mañana", "am"],
-            "tarde": ["tarde", "por la tarde", "pm"],
-            "noche": ["noche"]
-        }
-        for time_pref, keywords in time_keywords.items():
-            if any(k in user_msg_lower for k in keywords):
-                facts["time_preference"] = time_pref
-                break
-
-        # Guardar hechos extraídos
-        profile.extracted_facts = facts
-        profile.last_seen = datetime.now(timezone.utc)
-
-        from db import get_async_session
-        async with get_async_session() as session:
-            # Si profile no existía, añadirlo
-            if not profile.id:
-                session.add(profile)
-            await session.flush()
-            await session.commit()
-
-        logger.debug("Hechos extraídos del perfil", phone=phone_number, facts=facts)
-
-    # ============================================
-    # STATE MACHINE (SupportState)
-    # ============================================
-
-    async def get_state(self, session_id: str, project_id: Optional[uuid.UUID] = None) -> Optional[Dict[str, Any]]:
-        """
-        Obtiene el estado de SupportState desde agent_states tabla.
-
-        Args:
-            session_id: ID de sesión (teléfono normalizado)
-            project_id: ID del proyecto (opcional, para filtrado multi-tenant)
-
-        Returns:
-            Dict con el estado completo, o None si no existe
-        """
+        """Extrae hechos relevantes de la conversación y los guarda en el perfil."""
         if not self._initialized:
             await self.initialize()
 
         from db import get_async_session
+
+        try:
+            async with get_async_session() as session:
+                stmt = select(UserProfile).where(
+                    UserProfile.phone_number == phone_number
+                )
+                if project_id:
+                    stmt = stmt.where(UserProfile.project_id == project_id)
+
+                result = await session.execute(stmt)
+                profile = result.scalar_one_or_none()
+                now = datetime.now(timezone.utc)
+
+                if profile is None:
+                    profile = UserProfile(
+                        phone_number=phone_number,
+                        project_id=project_id,
+                        first_seen=now,
+                        last_seen=now,
+                    )
+                    session.add(profile)
+
+                facts = dict(profile.extracted_facts or {})
+                user_msg_lower = user_message.lower()
+
+                service_keywords = {
+                    "limpieza": ["limpieza", "profilaxis"],
+                    "extracción": ["extracción", "sacar", "muela"],
+                    "empaste": ["empaste", "caries"],
+                    "ortodoncia": ["ortodoncia", "frenos", "braces"],
+                    "consulta": ["consulta", "revisión", "chequeo"],
+                }
+                for service, keywords in service_keywords.items():
+                    if any(k in user_msg_lower for k in keywords):
+                        facts["mentioned_service"] = service
+                        break
+
+                time_keywords = {
+                    "mañana": ["mañana", "por la mañana", "am"],
+                    "tarde": ["tarde", "por la tarde", "pm"],
+                    "noche": ["noche"],
+                }
+                for time_pref, keywords in time_keywords.items():
+                    if any(k in user_msg_lower for k in keywords):
+                        facts["time_preference"] = time_pref
+                        break
+
+                profile.extracted_facts = facts
+                profile.last_seen = now
+
+                await session.flush()
+                await session.commit()
+                logger.debug("Hechos extraídos", phone=phone_number, facts=facts)
+
+        except Exception as e:
+            logger.error(
+                "Error extrayendo hechos de conversación",
+                phone=phone_number,
+                error=str(e),
+                exc_info=True,
+            )
+
+    # ============================================
+    # STATE MACHINE
+    # ============================================
+
+    async def get_state(
+        self, session_id: str, project_id: Optional[uuid.UUID] = None
+    ) -> Optional[Dict[str, Any]]:
+        if not self._initialized:
+            await self.initialize()
+
+        from db import get_async_session
+
         async with get_async_session() as session:
             stmt = select(AgentState).where(AgentState.session_id == session_id)
-
             if project_id:
                 stmt = stmt.where(AgentState.project_id == project_id)
-
-            # Ordenar por updated_at DESC, limit 1
             stmt = stmt.order_by(AgentState.updated_at.desc()).limit(1)
 
             result = await session.execute(stmt)
@@ -612,21 +484,18 @@ class PostgresStorage:
                 return record.state
             return None
 
-    async def save_state(self, session_id: str, state: Dict[str, Any], project_id: Optional[uuid.UUID] = None) -> None:
-        """
-        Guarda el estado de SupportState en agent_states tabla.
-
-        Args:
-            session_id: ID de sesión
-            state: Estado completo (dict) a guardar
-            project_id: ID del proyecto (opcional)
-        """
+    async def save_state(
+        self,
+        session_id: str,
+        state: Dict[str, Any],
+        project_id: Optional[uuid.UUID] = None,
+    ) -> None:
         if not self._initialized:
             await self.initialize()
 
         from db import get_async_session
+
         async with get_async_session() as session:
-            # Buscar registro existente
             stmt = select(AgentState).where(AgentState.session_id == session_id)
             if project_id:
                 stmt = stmt.where(AgentState.project_id == project_id)
@@ -635,31 +504,38 @@ class PostgresStorage:
             existing = result.scalar_one_or_none()
 
             if existing:
-                # Actualizar existente
                 existing.state = state
                 existing.updated_at = datetime.now(timezone.utc)
-                logger.debug(
-                    "Estado actualizado",
-                    session_id=session_id,
-                    project_id=str(project_id) if project_id else None,
-                    keys=list(state.keys())
-                )
+                logger.debug("Estado actualizado", session_id=session_id)
             else:
-                # Crear nuevo
                 record = AgentState(
                     session_id=session_id,
                     project_id=project_id,
                     state=state,
                     created_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc)
+                    updated_at=datetime.now(timezone.utc),
                 )
                 session.add(record)
-                logger.debug(
-                    "Estado creado",
-                    session_id=session_id,
-                    project_id=str(project_id) if project_id else None,
-                    keys=list(state.keys())
-                )
+                logger.debug("Estado creado", session_id=session_id)
 
             await session.flush()
             await session.commit()
+
+    # ============================================
+    # HELPER PRIVADO
+    # ============================================
+
+    def _profile_to_dict(self, profile: UserProfile) -> Dict[str, Any]:
+        """Convierte ORM UserProfile a Dict para evitar objetos detached fuera de sesión."""
+        return {
+            "phone_number": profile.phone_number,
+            "project_id": str(profile.project_id) if profile.project_id else None,
+            "preferences": profile.preferences or {},
+            "notes": profile.notes or "",
+            "extracted_facts": profile.extracted_facts or {},
+            "total_conversations": profile.total_conversations or 0,
+            "first_seen": profile.first_seen.isoformat()
+            if profile.first_seen
+            else None,
+            "last_seen": profile.last_seen.isoformat() if profile.last_seen else None,
+        }

@@ -1,184 +1,192 @@
-# Migración de DeyyAgent a StateGraph
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional, TypedDict
 
-## Cambios Requeridos
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_openai import ChatOpenAI
 
-### 1. Reemplazar initialize()
-```python
-async def initialize(self):
-    """Inicializa el agente con StateGraph (DeyyGraph)"""
-    if self._initialized:
-        return
+# Tu graph
+from graphs.deyy_graph import create_deyy_graph
 
-    logger.info(
-        "Inicializando DeyyAgent",
-        project_id=str(self.project_id) if self.project_id else None
-    )
+logger = logging.getLogger(__name__)
 
-    # Crear LLM
-    self._llm = ChatOpenAI(
-        model=self.llm_model,
-        temperature=self.llm_temperature,
-        api_key=get_settings().OPENAI_API_KEY,
-        timeout=get_settings().OPENAI_TIMEOUT,
-        max_retries=3
-    )
 
-    # Inicializar servicio de citas
-    if self.project_config:
-        self.appointment_service = ProjectAppointmentService(self.project_config)
-    else:
-        self.appointment_service = _get_appointment_service()
+# =========================
+# 🧠 STATE (CLAVE)
+# =========================
+class DeyyState(TypedDict):
+    messages: List[BaseMessage]
+    phone_number: str
+    project_id: Optional[str]
 
-    # Crear DeyyGraph
-    self._graph = await create_deyy_graph(
-        session_id=self.session_id,
-        store=self.store,
-        project_id=self.project_id,
-        system_prompt=self.system_prompt,
-        llm_model=self.llm_model,
-        llm_temperature=self.llm_temperature
-    )
 
-    self._initialized = True
-    logger.info("DeyyAgent inicializado con StateGraph")
-```
-
-### 2. Reemplazar process_message()
-```python
-async def process_message(
-    self,
-    message: str,
-    save_to_memory: bool = True,
-    check_toggle: bool = True
-) -> Dict[str, Any]:
+# =========================
+# 🔧 UTILS
+# =========================
+def format_history(history_raw: List[Dict[str, Any]]) -> List[BaseMessage]:
     """
-    Procesa un mensaje del usuario usando StateGraph.
+    Convierte historial de DB → mensajes de LangChain
     """
-    start_time = datetime.utcnow()
+    formatted = []
 
-    try:
-        if not self._initialized:
-            await self.initialize()
+    for msg in history_raw:
+        role = msg.get("role") or msg.get("type")
+        content = msg.get("message") or msg.get("content")
 
-        # Extraer phone_number
-        phone = self._extract_phone_from_session(self.session_id)
+        if not content:
+            continue
 
-        # Context vars
-        project_token = None
-        if self.project_id:
-            project_token = set_current_project(self.project_id, self.project_config)
+        if role in ["human", "user"]:
+            formatted.append(HumanMessage(content=content))
 
-        # Verificar toggle
-        if check_toggle and self.project_id:
-            toggle_enabled = await self._check_agent_toggle()
-            if not toggle_enabled:
-                logger.info("Agente deshabilitado", session_id=self.session_id)
-                if save_to_memory:
-                    await self.store.add_message(
-                        self.session_id, message, "human", self.project_id
-                    )
-                return {
-                    "status": "agent_disabled",
-                    "response": "Lo siento, el agente está temporalmente deshabilitado.",
-                    "agent_disabled": True
-                }
+        elif role in ["ai", "assistant"]:
+            formatted.append(AIMessage(content=content))
 
-        # Set phone context
-        token = set_current_phone(phone)
+    return formatted
+
+
+# =========================
+# 🤖 AGENTE
+# =========================
+class DeyyAgent:
+    def __init__(
+        self,
+        session_id: str,
+        store,
+        project_id: Optional[str] = None,
+        project_config: Optional[Dict] = None,
+        system_prompt: Optional[str] = None,
+        llm_model: str = "gpt-4o-mini",
+        llm_temperature: float = 0.2,
+    ):
+        self.session_id = session_id
+        self.store = store
+        self.project_id = project_id
+        self.project_config = project_config
+        self.system_prompt = system_prompt
+
+        self.llm_model = llm_model
+        self.llm_temperature = llm_temperature
+
+        self._initialized = False
+        self._graph = None
+        self._llm = None
+
+    # =========================
+    # 🚀 INIT
+    # =========================
+    async def initialize(self):
+        if self._initialized:
+            return
+
+        logger.info("Inicializando DeyyAgent")
+
+        # LLM
+        self._llm = ChatOpenAI(
+            model=self.llm_model, temperature=self.llm_temperature, max_retries=3
+        )
+
+        # GRAPH
+        self._graph = await create_deyy_graph(
+            session_id=self.session_id,
+            store=self.store,
+            project_id=self.project_id,
+            system_prompt=self.system_prompt,
+            llm_model=self.llm_model,
+            llm_temperature=self.llm_temperature,
+        )
+
+        self._initialized = True
+        logger.info("DeyyAgent listo con StateGraph")
+
+    # =========================
+    # 📩 PROCESS MESSAGE
+    # =========================
+    async def process_message(
+        self, message: str, save_to_memory: bool = True, check_toggle: bool = True
+    ) -> Dict[str, Any]:
+
+        start_time = datetime.utcnow()
 
         try:
-            # 1. Cargar historial desde store
-            history = await self.store.get_history(self.session_id)
+            if not self._initialized:
+                await self.initialize()
 
-            # 2. Crear estado inicial
-            from graphs.deyy_graph import DeyyState
-            state = DeyyState(
-                messages=history,
-                phone_number=phone,
-                project_id=self.project_id
-            )
+            phone = self._extract_phone_from_session(self.session_id)
 
-            # 3. Añadir mensaje del usuario
-            state["messages"].append(HumanMessage(content=message))
+            # =========================
+            # 1. HISTORIAL
+            # =========================
+            history_raw = await self.store.get_history(self.session_id)
+            history = format_history(history_raw)
 
-            # 4. Invocar StateGraph
+            # =========================
+            # 2. STATE
+            # =========================
+            state: DeyyState = {
+                "messages": history,
+                "phone_number": phone,
+                "project_id": self.project_id,
+            }
+
+            # =========================
+            # 3. NUEVO MENSAJE
+            # =========================
+            state["messages"] = state["messages"] + [HumanMessage(content=message)]
+
+            # =========================
+            # 4. EJECUTAR GRAPH
+            # =========================
             config = {"configurable": {"thread_id": self.session_id}}
+
             result = await self._graph.ainvoke(state, config=config)
 
-            # 5. Extraer respuesta (último mensaje AI)
-            response = ""
-            if result.get("messages"):
-                ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
-                if ai_messages:
-                    response = ai_messages[-1].content
+            # =========================
+            # 5. RESPUESTA
+            # =========================
+            messages = result.get("messages", [])
+
+            ai_messages = [m for m in messages if isinstance(m, AIMessage)]
+
+            response = ai_messages[-1].content if ai_messages else ""
 
             execution_time = (datetime.utcnow() - start_time).total_seconds()
 
-            # 6. Guardar en memoria y actualizar perfil (ya lo hace after_agent_node)
-            # No es necesario hacerlo aquí
-
             logger.info(
-                "Mensaje procesado con StateGraph",
+                "Mensaje procesado",
                 session_id=self.session_id,
-                execution_time=execution_time
+                execution_time=execution_time,
             )
 
             return {
                 "status": "success",
                 "response": response,
                 "execution_time_seconds": execution_time,
-                "session_id": self.session_id
+                "session_id": self.session_id,
             }
 
-        finally:
-            reset_phone(token)
-            if project_token:
-                reset_project(project_token)
+        except Exception as e:
+            execution_time = (datetime.utcnow() - start_time).total_seconds()
 
-    except Exception as e:
-        execution_time = (datetime.utcnow() - start_time).total_seconds()
-        logger.error(
-            "Error procesando mensaje",
-            session_id=self.session_id,
-            error=str(e),
-            execution_time=execution_time
-        )
-        return {
-            "status": "error",
-            "response": "Lo siento, ocurrió un error procesando tu mensaje.",
-            "error": str(e),
-            "execution_time_seconds": execution_time,
-            "session_id": self.session_id
-        }
-```
+            logger.error(
+                "Error procesando mensaje", error=str(e), session_id=self.session_id
+            )
 
-### 3. Eliminar métodos auxiliares no usados
-- `_extract_tool_calls` ya no es necesario (StateGraph maneja tools automáticamente)
-- ~~`_agent_executor`~~ → reemplazar por `_graph`
+            return {
+                "status": "error",
+                "response": "Error procesando el mensaje",
+                "error": str(e),
+                "execution_time_seconds": execution_time,
+                "session_id": self.session_id,
+            }
 
-### 4. Actualizar imports
-```python
-# Antes:
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-# Después:
-from graphs.deyy_graph import create_deyy_graph
-```
-
-### 5. Actualizar __init__
-```python
-self._graph: Optional[StateGraph] = None
-# Eliminar: self._agent_executor
-```
-
----
-## Resumen
-- ✅ DeyyGraph completo con 3 nodos: load → agent → after → END
-- ✅ after_agent_node guarda mensajes y actualiza perfil
-- ✅ Checkpointer PostgresSaver integrado
-- ✅ Inyección de store en todos los nodos
-- ✅ Manejo de errores robusto
-"""
-
-print(__doc__)
+    # =========================
+    # 📞 HELPERS
+    # =========================
+    def _extract_phone_from_session(self, session_id: str) -> str:
+        """
+        Ajusta esto según tu formato real
+        """
+        if ":" in session_id:
+            return session_id.split(":")[1]
+        return session_id
