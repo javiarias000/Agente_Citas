@@ -5,6 +5,7 @@ Sin dependencia en n8n - comunicación directa con WhatsApp API
 """
 
 import asyncio
+import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 import os
@@ -19,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from core.config import get_settings
 from memory.memory_manager import MemoryManager
 from services.whatsapp_service import WhatsAppService, WhatsAppMessage, WhatsAppError
+from services.chatwoot_service import ChatwootService, ChatwootMessage, ChatwootError
 from db.models import Conversation, Message, Base, ProjectAgentConfig, Project
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -115,6 +117,14 @@ class ArcadiumAPI:
 
         # Inicializar WhatsApp Service
         self.whatsapp_service = WhatsAppService(self.settings)
+
+        # Inicializar Chatwoot Service (si está configurado)
+        if self.settings.CHATWOOT_API_URL and self.settings.CHATWOOT_API_TOKEN:
+            self.chatwoot_service = ChatwootService(self.settings)
+            logger.info("ChatwootService inicializado")
+        else:
+            self.chatwoot_service = None
+            logger.info("Chatwoot no configurado (settings faltantes)")
 
         # Cargar métricas si está habilitado
         if self.settings.ENABLE_METRICS:
@@ -624,6 +634,7 @@ class ArcadiumAPI:
 
         # Endpoints originales
         app.post("/webhook/whatsapp")(self._handle_whatsapp_webhook)
+        app.post("/webhook/chatwoot")(self._handle_chatwoot_webhook)
         app.post("/webhook/test")(self._handle_test_webhook)
         app.get("/health")(self._health_check)
         app.get("/metrics")(self._get_metrics)
@@ -805,6 +816,168 @@ class ArcadiumAPI:
         result = await agent.process_message(message)
 
         return result
+
+    async def _handle_chatwoot_webhook(
+        self,
+        request: Request
+    ) -> Dict[str, Any]:
+        """
+        Webhook de Chatwoot
+        Recibe mensajes y los procesa a través del agente
+        """
+        async with self.db.get_session() as session:
+            try:
+                # Validar firma del webhook (opcional)
+                if self.settings.CHATWOOT_WEBHOOK_SECRET:
+                    signature = request.headers.get("X-Chatwoot-Signature", "")
+                    # Leer payload raw para verificar firma
+                    raw_payload = await request.body()
+                    from services.chatwoot_service import ChatwootService
+                    if not ChatwootService.verify_webhook_signature(
+                        raw_payload,
+                        signature,
+                        self.settings.CHATWOOT_WEBHOOK_SECRET
+                    ):
+                        logger.error("Firma de webhook Chatwoot inválida")
+                        raise HTTPException(status_code=401, detail="Invalid signature")
+                    # Re-parsesar JSON después de leer body
+                    payload = json.loads(raw_payload) if isinstance(raw_payload, bytes) else raw_payload
+                else:
+                    payload = await request.json()
+
+                logger.info("Webhook Chatwoot recibido", payload_keys=list(payload.keys()))
+
+                # Parsear payload de Chatwoot
+                from services.chatwoot_service import ChatwootService
+                webhook_data = ChatwootService.parse_webhook_payload(payload)
+
+                if not webhook_data:
+                    logger.error(
+                        "Payload Chatwoot inválido - VER LOGS ANTERIORES",
+                        payload_sample=str(payload)[:200]
+                    )
+                    return {"status": "ignored", "reason": "Invalid payload"}
+
+                # Ignorar si es mensaje del agente (ya hace parse_webhook_payload)
+                if webhook_data["sender_type"] == "agent":
+                    return {"status": "ignored", "reason": "Message from agent"}
+
+                # Normalizar identificador del contacto
+                try:
+                    normalized_contact = ChatwootService.normalize_contact(webhook_data["contact"])
+                except ValueError as e:
+                    logger.error("No se pudo normalizar contacto", error=str(e))
+                    return {"status": "error", "reason": "Invalid contact"}
+
+                logger.info(
+                    "Webhook Chatwoot: datos extraídos",
+                    contact=normalized_contact,
+                    conversation_id=webhook_data["conversation_id"],
+                    content_preview=webhook_data["content"][:50]
+                )
+
+                # Extraer project_id
+                project_id = self._extract_project_id(payload, request)
+                # Si no se provee, usar default_project_id
+                if not project_id and self.default_project_id:
+                    project_id = self.default_project_id
+                    logger.debug("Chatwoot webhook: usando project_id por defecto", project_id=str(project_id))
+
+                # Crear o recuperar conversación
+                conversation = await self._get_or_create_conversation(
+                    session,
+                    phone_number=normalized_contact,
+                    platform="chatwoot",
+                    project_id=project_id
+                )
+
+                # Guardar conversation_id de Chatwoot en meta_data (para envío de respuestas)
+                chatwoot_conv_id = webhook_data["conversation_id"]
+                if conversation.meta_data is None:
+                    conversation.meta_data = {}
+                conversation.meta_data["chatwoot_conversation_id"] = chatwoot_conv_id
+                conversation.meta_data["chatwoot_account_id"] = webhook_data.get("account_id")
+                conversation.meta_data["chatwoot_inbox_id"] = webhook_data.get("inbox_id")
+
+                # Guardar mensaje entrante
+                inbound_msg = Message(
+                    project_id=conversation.project_id,
+                    conversation_id=conversation.id,
+                    direction="inbound",
+                    message_type=webhook_data["message_type"],
+                    content=webhook_data["content"],
+                    raw_payload=payload,
+                    processed=False
+                )
+                session.add(inbound_msg)
+                await session.flush()
+
+                # Procesar con agente
+                agent = await self._get_or_create_agent(
+                    session_id=normalized_contact,
+                    project_id=conversation.project_id
+                )
+
+                # Procesar mensaje
+                result = await agent.process_message(webhook_data["content"])
+
+                # Log para debug
+                logger.info("Resultado del agente", result_type=type(result).__name__, result_preview=str(result)[:200])
+
+                # Normalizar resultado (puede ser dict o AgentResponse object)
+                if hasattr(result, 'text'):
+                    # Es un objeto AgentResponse (LangGraph)
+                    response_text = result.text
+                    status = result.status
+                    tool_calls = getattr(result, 'tool_calls', [])
+                    exec_time = getattr(result, 'execution_time_seconds', 0)
+                else:
+                    # Es un dict (DeyyAgent u otro)
+                    response_text = result.get("response", "")
+                    status = result.get("status", "ok")
+                    tool_calls = result.get("tool_calls", [])
+                    exec_time = result.get("execution_time_seconds", 0)
+
+                # Actualizar mensaje con resultado
+                inbound_msg.processed = True
+                inbound_msg.agent_response = response_text
+                inbound_msg.tool_calls = tool_calls
+                inbound_msg.execution_time_ms = exec_time * 1000 if exec_time else 0
+
+                # Enviar respuesta a Chatwoot si es exitoso
+                if status == "success" or status == "ok":
+                    try:
+                        chatwoot_msg = ChatwootMessage(
+                            conversation_id=chatwoot_conv_id,
+                            content=response_text,
+                            message_type="text"
+                        )
+                        send_result = await self.chatwoot_service.send_message(chatwoot_msg)
+                        inbound_msg.raw_payload["chatwoot_response"] = send_result
+                    except ChatwootError as e:
+                        logger.error("Error enviando respuesta a Chatwoot", error=str(e))
+                        inbound_msg.processing_error = f"Chatwoot send failed: {str(e)}"
+
+                await session.commit()
+
+                logger.info(
+                    "Webhook Chatwoot procesado",
+                    session_id=agent.session_id,
+                    status=status,
+                    execution_time=exec_time
+                )
+
+                return {
+                    "status": "processed",
+                    "session_id": agent.session_id,
+                    "response": response_text
+                }
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error("Error procesando webhook Chatwoot", error=str(e), exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
     async def _parse_whatsapp_payload(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """

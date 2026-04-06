@@ -30,38 +30,38 @@ async def migrate_states(engine, dry_run: bool = False) -> Dict[str, int]:
     stats = {"read": 0, "converted": 0, "skipped": 0, "errors": 0}
 
     # Leer todos los estados
-    sql = text("SELECT id, session_id, state_data FROM agent_states")
+    sql = text("SELECT id, session_id, state FROM agent_states")
     async with engine.begin() as conn:
         rows = await conn.execute(sql)
 
     for row in rows:
         stats["read"] += 1
         session_id = row[1]
-        state_data = row[2]
+        state = row[2]
 
-        if isinstance(state_data, str):
-            state_data = json.loads(state_data)
+        if isinstance(state, str):
+            state = json.loads(state)
 
         # Skip si ya es v2
-        if state_data.get("version") == 2:
+        if state.get("version") == 2:
             stats["skipped"] += 1
             continue
 
         try:
-            new_state = _convert_state(state_data)
+            new_state = _convert_state(state)
             new_state["version"] = 2
 
             if dry_run:
                 logger.info(
                     "DRY-RUN: estado a migrar",
                     session_id=session_id,
-                    old_version=state_data.get("version"),
+                    old_version=state.get("version"),
                     new_keys=list(new_state.keys()),
                 )
             else:
                 # Guardar nuevo estado
                 upsert_sql = text(
-                    "UPDATE agent_states SET state_data = :data::jsonb "
+                    "UPDATE agent_states SET state = :data::jsonb "
                     "WHERE session_id = :sid"
                 )
                 await conn.execute(
@@ -74,7 +74,7 @@ async def migrate_states(engine, dry_run: bool = False) -> Dict[str, int]:
                 logger.info(
                     "Estado migrado",
                     session_id=session_id,
-                    old_version=state_data.get("version"),
+                    old_version=state.get("version"),
                 )
 
             stats["converted"] += 1

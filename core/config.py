@@ -39,6 +39,28 @@ class Settings(BaseSettings):
         description="Número de admin para notificaciones (formato: 1234567890@s.whatsapp.net)"
     )
 
+    # Chatwoot API
+    CHATWOOT_API_URL: str = Field(
+        default="",
+        description="URL base de Chatwoot API (ej: https://app.chatwoot.com)"
+    )
+    CHATWOOT_API_TOKEN: Optional[str] = Field(
+        default=None,
+        description="Personal Access Token o API Key de Chatwoot"
+    )
+    CHATWOOT_ACCOUNT_ID: Optional[int] = Field(
+        default=None,
+        description="ID de la cuenta en Chatwoot"
+    )
+    CHATWOOT_INBOX_ID: Optional[int] = Field(
+        default=None,
+        description="ID del inbox (canal) en Chatwoot"
+    )
+    CHATWOOT_WEBHOOK_SECRET: Optional[str] = Field(
+        default=None,
+        description="Secreto para verificar webhooks de Chatwoot (opcional)"
+    )
+
     # Base de datos
     DATABASE_URL: str = Field(
         default="postgresql+psycopg2://user:pass@localhost:5432/arcadium",

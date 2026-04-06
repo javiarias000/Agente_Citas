@@ -198,7 +198,7 @@ class PostgresStore(BaseStore):
     async def get_agent_state(self, phone: str) -> Optional[Dict[str, Any]]:
         from sqlalchemy import text
         sql = text(
-            "SELECT state_data FROM agent_states "
+            "SELECT state FROM agent_states "
             "WHERE session_id = :sid "
             "ORDER BY updated_at DESC LIMIT 1"
         )
@@ -206,7 +206,7 @@ class PostgresStore(BaseStore):
         if row is None:
             return None
         data = dict(row._mapping)
-        state = data["state_data"]
+        state = data["state"]
         if isinstance(state, str):
             state = json.loads(state)
         return state
@@ -214,10 +214,10 @@ class PostgresStore(BaseStore):
     async def save_agent_state(self, phone: str, state: Dict[str, Any]) -> None:
         from sqlalchemy import text
         sql = text(
-            "INSERT INTO agent_states (session_id, state_data, updated_at) "
+            "INSERT INTO agent_states (session_id, state, updated_at) "
             "VALUES (:sid, :data::jsonb, now()) "
             "ON CONFLICT (session_id) DO UPDATE "
-            "SET state_data = :data::jsonb, updated_at = now()"
+            "SET state = :data::jsonb, updated_at = now()"
         )
         await self._execute(sql, {
             "sid": f"deyy_{phone}",
