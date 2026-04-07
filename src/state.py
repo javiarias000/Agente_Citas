@@ -162,6 +162,8 @@ TRANSIENT_FIELDS: Set[str] = {
     "confirmation_result",
     "datetime_adjusted",
     "available_slots",  # slots del turno actual
+    "semantic_memory_context",  # contexto semántico (se regenera cada turno)
+    "_tool_iterations",  # contador de iteraciones de tool-calling
 }
 
 

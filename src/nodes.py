@@ -21,6 +21,7 @@ FIXES APLICADOS:
 from __future__ import annotations
 
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -31,13 +32,17 @@ try:
 except ImportError:
     pass
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from src.llm_extractors import (
     extract_booking_data,
     extract_intent_llm,
     generate_deyy_response,
 )
+from memory_agent_integration.memory_tools import upsert_memory_arcadium
+from agents.langchain_compat import create_openai_tools_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from functools import partial
 from src.state import (
     DIAS_ES,
     TIMEZONE,
@@ -48,6 +53,39 @@ from src.state import (
 )
 
 logger = structlog.get_logger("langgraph.nodes")
+
+
+# ═══════════════════════════════════════════════════════════
+# PROMPT PARA GENERACIÓN DE RESPUESTA CON TOOL-CALLING
+# ═══════════════════════════════════════════════════════════
+
+_GENERATE_RESPONSE_SYSTEM_WITH_TOOLS = """\
+Eres Deyy, asistente virtual de recepción de Arcadium Rehabilitación Oral (Ecuador).
+
+REGLAS INQUEBRANTABLES:
+1. Habla en español usando "usted" (no "tú", no "vos").
+2. MÁXIMO 2 líneas de texto por mensaje.
+3. MÁXIMO 2 emojis, y SOLO de este set: 😊 👋 📅 ✅ ❌ 🦷 ⏰ 📞
+4. NUNCA anuncies lo que vas a hacer ("Voy a revisar la disponibilidad...").
+5. NUNCA digas "Estoy aquí para ayudarle" ni frases robóticas similares.
+6. Sé cálida pero profesional.
+7. Si hay slots disponibles, muestra máximo 4 los más cercanos.
+8. Si falta información, pregunta por UNA sola cosa a la vez.
+9. Si se agendó exitosamente, confirma fecha + hora + servicio.
+10. Si hay error, sugiere llamar a la clínica: 📞.
+11. NUNCA repitas una pregunta que ya hiciste en el historial.
+12. Si el usuario ya dio un dato (nombre, servicio, fecha), NO lo pidas de nuevo.
+
+INSTRUCCIÓN ADICIONAL (HERRAMIENTA DE MEMORIA):
+Si el usuario revela información personal importante (nombre, alergias, preferencias, datos médicos, etc.)
+que deba recordarse en futuras conversaciones, usa la herramienta upsert_memory_arcadium.
+- content: describe el hecho de forma clara y concisa.
+- context: indica cuándo/por qué se mencionó (ej: "Mencionado durante conversación del 2025-04-07").
+No anuncies que guardas la información; simplemente usa la herramienta cuando corresponda.
+
+SITUACIÓN ACTUAL:
+{context}
+"""
 
 
 # ═══════════════════════════════════════
@@ -133,6 +171,7 @@ async def node_entry(
         "manana_dia": DIAS_ES[manana.weekday()],
         "conversation_turns": state.get("conversation_turns", 0) + 1,
         "_extract_data_calls": 0,
+        "_tool_iterations": 0,
     }
 
     # Obtener el mensaje nuevo desde _incoming_message (enviado por agent.py)
@@ -153,6 +192,7 @@ async def node_entry(
             # FIX: SIEMPRE cargar historial del store y añadir el mensaje nuevo.
             # No condicionarlo a si state["messages"] está vacío o no.
             history = await store.get_history(phone, limit=50)
+            logger.info("node_entry: historial cargado", phone=phone, history_len=len(history))
             updates["messages"] = list(history) + [new_message]
 
             # Restaurar campos persistentes que no vinieron en el estado
@@ -458,14 +498,17 @@ async def node_save_state(
         from langchain_core.messages import AIMessage
         from langchain_core.messages import HumanMessage as HM
 
+        saved_count = 0
         for msg in messages:
             if isinstance(msg, (HM, AIMessage)):
                 try:
                     await store.add_message(
                         phone, msg, project_id=state.get("project_id")
                     )
+                    saved_count += 1
                 except Exception as e:
                     logger.warning("Error guardando mensaje", error=str(e))
+        logger.info("node_save_state: mensajes guardados", phone=phone, count=saved_count)
 
         # Actualizar perfil del usuario
         profile_updates = {}
@@ -601,7 +644,7 @@ async def node_generate_response(
 
 
 def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
-    """Construye dict de contexto para node_generate_response."""
+    """Construye dict de contexto para generación de respuesta."""
     return {
         "intent": state.get("intent"),
         "patient_name": state.get("patient_name"),
@@ -616,4 +659,268 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
         "datetime_preference": state.get("datetime_preference"),
         "last_error": state.get("last_error"),
         "conversation_turns": state.get("conversation_turns", 0),
+        "semantic_memory_context": state.get("semantic_memory_context", ""),
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# NODO GENERATE_RESPONSE CON TOOL-CALLING
+# ═══════════════════════════════════════════════════════════
+
+async def node_generate_response_with_tools(
+    state: ArcadiumState,
+    *,
+    llm=None,
+    vector_store=None,
+) -> Dict[str, Any]:
+    """
+    Genera la respuesta final de Deyy con soporte para tool-calling.
+
+    Si vector_store está disponible, bindea la herramienta upsert_memory_arcadium.
+    Flujo:
+    1. Construye prompt con contexto.
+    2. Invoca LLM con bind_tools.
+    3. Devuelve mensaje AI (puede contener tool_calls).
+
+    El routing condicional decidirá si ejecutar herramientas o guardar estado.
+    """
+    if not llm:
+        fallback = "Lo siento, hubo un error. Por favor intente nuevamente o llame a la clínica. 📞"
+        from langchain_core.messages import AIMessage
+
+        return {"messages": [AIMessage(content=fallback)]}
+
+    # Incrementar contador de iteraciones
+    iterations = state.get("_tool_iterations", 0) + 1
+
+    # Construir contexto para system prompt
+    context_dict = _build_llm_context(state)
+    context_parts = []
+
+    intent = context_dict.get("intent")
+    if intent:
+        context_parts.append(f"Intención del usuario: {intent}")
+
+    missing = context_dict.get("missing_fields", [])
+    if missing:
+        context_parts.append(
+            f"Datos que faltan: {', '.join(missing)}. Pídelos de a uno."
+        )
+
+    patient_name = context_dict.get("patient_name")
+    if patient_name:
+        context_parts.append(f"Nombre del paciente: {patient_name}")
+
+    selected_service = context_dict.get("selected_service")
+    if selected_service:
+        context_parts.append(f"Servicio seleccionado: {selected_service}")
+
+    datetime_pref = context_dict.get("datetime_preference")
+    if datetime_pref:
+        context_parts.append(f"Fecha/hora preferida: {datetime_pref}")
+
+    slots = context_dict.get("available_slots", [])
+    if slots:
+        readable = _format_slots(slots[:4])
+        context_parts.append(f"Slots disponibles: {readable}")
+
+    selected_slot = context_dict.get("selected_slot")
+    if selected_slot:
+        context_parts.append(f"Usuario eligió slot: {selected_slot}")
+
+    appt_id = context_dict.get("appointment_id")
+    if appt_id:
+        svc = context_dict.get("selected_service", "")
+        slot = context_dict.get("selected_slot") or context_dict.get("datetime_preference", "")
+        context_parts.append(
+            f"Cita agendada exitosamente: {svc} el {slot}. Confirma al usuario."
+        )
+
+    error = context_dict.get("last_error")
+    if error:
+        context_parts.append(f"Error ocurrido: {error}. Sugiere llamar a la clínica.")
+
+    turns = context_dict.get("conversation_turns", 0)
+    if turns >= 8:
+        context_parts.append(
+            "Ya van muchos mensajes. Considera ofrecer llamar a la clínica."
+        )
+
+    semantic = context_dict.get("semantic_memory_context")
+    if semantic:
+        context_parts.append(f"INFORMACIÓN PREVIA DEL USUARIO:\n{semantic}")
+
+    context_str = (
+        "\n".join(context_parts) if context_parts else "Sin contexto específico."
+    )
+
+    system_prompt = _GENERATE_RESPONSE_SYSTEM_WITH_TOOLS.format(context=context_str)
+
+    # Preparar mensajes para el LLM: system + historial
+    history = state.get("messages", [])
+    from langchain_core.messages import SystemMessage
+
+    lm_messages = [SystemMessage(content=system_prompt)] + list(history)
+
+    # Bindear herramienta si hay vector_store y phone_number
+    bound_tool = None
+    if vector_store:
+        user_id = state.get("phone_number", "")
+        if user_id:
+            bound_tool = upsert_memory_arcadium
+        else:
+            logger.warning("No hay phone_number en estado, omitiendo tool binding")
+
+    try:
+        if bound_tool:
+            llm_with_tools = llm.bind_tools([bound_tool])
+            response = await llm_with_tools.ainvoke(lm_messages)
+        else:
+            # Sin herramienta: generar respuesta simple (fallback)
+            response = await llm.ainvoke(lm_messages)
+
+        return {
+            "messages": [response],
+            "_tool_iterations": iterations,
+        }
+
+    except Exception as e:
+        logger.error("Error en node_generate_response_with_tools", error=str(e))
+        from langchain_core.messages import AIMessage
+
+        return {
+            "messages": [AIMessage(content=f"Lo siento, hubo un error generando la respuesta.")],
+            "_tool_iterations": iterations,
+            "last_error": str(e),
+            "should_escalate": True,
+        }
+
+
+# ═══════════════════════════════════════════════════════════
+# NODO EJECUCIÓN DE MEMORY TOOLS
+# ═══════════════════════════════════════════════════════════
+
+async def node_execute_memory_tools(
+    state: ArcadiumState,
+    *,
+    vector_store=None,
+) -> Dict[str, Any]:
+    """
+    Ejecuta los tool calls de upsert_memory_arcadium presentes en el último mensaje AI.
+
+    Extrae tool_calls y guarda las memorias directamente en el vector_store.
+    Devuelve ToolMessages con确认.
+    """
+    if not vector_store:
+        logger.warning("vector_store no disponible, omitiendo ejecución de memory tools")
+        return {}
+
+    messages = state.get("messages", [])
+    if not messages:
+        return {}
+
+    last_message = messages[-1]
+    tool_calls = getattr(last_message, "tool_calls", [])
+    if not tool_calls:
+        return {}
+
+    tool_messages = []
+    user_id = state.get("phone_number", "")
+
+    for tc in tool_calls:
+        tool_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+        tool_args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+        tool_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+
+        if tool_name != "upsert_memory_arcadium":
+            logger.warning("Tool desconocido en node_execute_memory_tools", tool_name=tool_name)
+            continue
+
+        if not user_id:
+            logger.warning("No hay phone_number en estado, omitiendo tool call")
+            continue
+
+        try:
+            content = tool_args.get("content", "")
+            context = tool_args.get("context", "")
+            memory_id = tool_args.get("memory_id")  # opcional, si None generamos nuevo
+
+            #Namespace: por defecto ("memories", user_id). Futuro: project_id
+            namespace = ("memories", user_id)
+            mem_id = memory_id or str(uuid.uuid4())
+
+            value = {
+                "content": content,
+                "context": context,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+
+            await vector_store.aput(namespace, key=mem_id, value=value)
+
+            logger.info(
+                "Memoria guardada por node_execute_memory_tools",
+                user_id=user_id,
+                memory_id=mem_id,
+                content=content[:50],
+            )
+
+            result_msg = f"Memoria guardada. ID: {mem_id}"
+            if memory_id:
+                result_msg = f"Memoria actualizada. ID: {mem_id}"
+
+            from langchain_core.messages import ToolMessage
+
+            if tool_id:
+                tool_messages.append(
+                    ToolMessage(content=result_msg, tool_call_id=tool_id)
+                )
+            else:
+                logger.warning("Tool call sin id, omitiendo ToolMessage")
+
+        except Exception as e:
+            logger.error("Error en node_execute_memory_tools", error=str(e), exc_info=True)
+            if tool_id:
+                from langchain_core.messages import ToolMessage
+                tool_messages.append(
+                    ToolMessage(content=f"Error guardando memoria: {str(e)}", tool_call_id=tool_id)
+                )
+
+    if tool_messages:
+        return {"messages": tool_messages}
+    return {}
+
+
+# ═══════════════════════════════════════════════════════════
+# EDGE: DESPUÉS DE GENERATE_RESPONSE
+# ═══════════════════════════════════════════════════════════
+
+def edge_after_generate_response(state: ArcadiumState) -> str:
+    """
+    Routing condicional después de generate_response_with_tools.
+
+    Si el último mensaje AI tiene tool_calls y no se ha excedido el límite de iteraciones,
+    va a execute_memory_tools. En caso contrario, va a save_state.
+    """
+    messages = state.get("messages", [])
+    if not messages:
+        return "save_state"
+
+    last_msg = messages[-1]
+    tool_calls = getattr(last_msg, "tool_calls", None)
+
+    if tool_calls:
+        iterations = state.get("_tool_iterations", 0)
+        if iterations >= 2:
+            logger.warning(
+                "Límite de tool-iterations alcanzado, omitiendo tool calls",
+                iterations=iterations,
+            )
+            return "save_state"
+        logger.debug(
+            "Tool calls detectados, enrutando a execute_memory_tools",
+            iterations=iterations,
+            tool_calls_count=len(tool_calls),
+        )
+        return "execute_memory_tools"
+
+    return "save_state"

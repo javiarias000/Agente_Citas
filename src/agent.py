@@ -62,6 +62,7 @@ class ArcadiumAgent:
         calendar_service=None,
         db_service=None,
         project_id: Optional[uuid.UUID] = None,
+        memory_integration=None,  # NUEVO: MemoryAgentIntegration opcional
     ):
         self.session_id = session_id
         self.graph = graph
@@ -70,6 +71,7 @@ class ArcadiumAgent:
         self.calendar_service = calendar_service
         self.db_service = db_service
         self.project_id = project_id
+        self.memory_integration = memory_integration  # NUEVO
         self._initialized = False
         self._lock = asyncio.Lock()
         self._phone_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
@@ -142,6 +144,23 @@ class ArcadiumAgent:
         except Exception as e:
             logger.warning("No se pudo cargar estado previo", error=str(e))
 
+        # CRÍTICO: recalcular missing_fields DESPUÉS de restaurar campos
+        from src.state import get_missing_fields
+        state["missing_fields"] = get_missing_fields(state)
+
+        # NUEVO: Enriquecer con contexto semántico si memory_agent está habilitado
+        if self.memory_integration:
+            phone = self.session_id.replace("deyy_", "")
+            semantic_context = await self._get_semantic_context(phone, message)
+            if semantic_context:
+                # Añadir al estado; el prompt del sistema debería referenciar esta variable
+                state["semantic_memory_context"] = semantic_context
+                logger.debug(
+                    "Contexto semántico inyectado",
+                    phone=phone,
+                    memories_count=semantic_context.count('\n')
+                )
+
         # Invocar grafo
         config = {"configurable": {"thread_id": self.session_id}}
         try:
@@ -178,3 +197,56 @@ class ArcadiumAgent:
             intent=state.get("intent"),
             should_escalate=state.get("should_escalate", False),
         )
+
+    async def _get_semantic_context(self, phone: str, query: str) -> str:
+        """
+        Recupera memorias semánticas relevantes para enriquecer el contexto del LLM.
+
+        Args:
+            phone: Número de teléfono del usuario
+            query: Texto de la consulta actual (para búsqueda por similitud)
+
+        Returns:
+            String formateado con memorias relevantes, o string vacío si none.
+        """
+        if not self.memory_integration or not self.memory_integration.initialized:
+            return ""
+
+        try:
+            user_id = phone  # Usamos phone como user_id
+            limit = getattr(
+                self.memory_integration.settings,
+                'MEMORY_AGENT_MAX_RESULTS',
+                5
+            )
+            threshold = getattr(
+                self.memory_integration.settings,
+                'MEMORY_AGENT_SIMILARITY_THRESHOLD',
+                0.7
+            )
+
+            memories = await self.memory_integration.search_memories(
+                user_id=user_id,
+                query=query,
+                project_id=self.project_id,
+                limit=limit,
+                threshold=threshold
+            )
+
+            if not memories:
+                return ""
+
+            # Formatear para incluir en prompt
+            lines = ["Memorias relevantes del usuario:"]
+            for mem in memories:
+                lines.append(f"- [{mem['key']}] {mem['content']} (contexto: {mem['context']})")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.warning(
+                "Error recuperando contexto semántico",
+                phone=phone,
+                error=str(e)
+            )
+            return ""

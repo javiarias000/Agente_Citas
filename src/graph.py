@@ -20,15 +20,17 @@ def build_graph(
     store: Any = None,
     calendar_service: Any = None,
     db_service: Any = None,
+    vector_store: Any = None,
 ) -> StateGraph:
     """
     Construye el StateGraph de Arcadium con todos los nodos y routing.
 
     Args:
         llm: ChatOpenAI (o compatible)
-        store: BaseStore (PostgresStore o InMemoryStore)
+        store: BaseStore (PostgresStore o InMemoryStore) para persistencia de mensajes.
         calendar_service: GoogleCalendarService wrapper
         db_service: AppointmentService
+        vector_store: BaseStore vectorial para memorias semánticas (MemoryAgentIntegration.store)
     """
     from src.state import ArcadiumState
 
@@ -45,8 +47,10 @@ def build_graph(
         node_validate_and_confirm,
         node_book_appointment,
         node_cancel_appointment,
-        node_generate_response,
+        node_generate_response_with_tools,
+        node_execute_memory_tools,
         node_save_state,
+        edge_after_generate_response,
     )
     from src.edges import (
         edge_after_route_intent,
@@ -90,7 +94,14 @@ def build_graph(
     # ── Nodos LLM ─────────────────────────────────────────────
     graph.add_node("extract_intent", partial(node_extract_intent, llm=llm))
     graph.add_node("extract_data", partial(node_extract_data, llm=llm))
-    graph.add_node("generate_response", partial(node_generate_response, llm=llm))
+    graph.add_node(
+        "generate_response",
+        partial(node_generate_response_with_tools, llm=llm, vector_store=vector_store),
+    )
+    graph.add_node(
+        "execute_memory_tools",
+        partial(node_execute_memory_tools, vector_store=vector_store),
+    )
 
     # ── Edges: entrada siempre → entry ───────────────────────
     graph.add_edge(START, "entry")
@@ -148,9 +159,17 @@ def build_graph(
     # check_availability → generate_response (mostrar slots)
     graph.add_edge("check_availability", "generate_response")
 
-    # generate_response → save_state → luego el siguiente mensaje del usuario
-    # entra de nuevo por entry, que lleva a detect_confirmation si hay contexto
-    graph.add_edge("generate_response", "save_state")
+    # generate_response → routing condicional (execute_memory_tools o save_state)
+    # luego de execute_memory_tools, vuelve a generate_response para segunda ronda
+    graph.add_conditional_edges(
+        "generate_response",
+        edge_after_generate_response,
+        {
+            "execute_memory_tools": "execute_memory_tools",
+            "save_state": "save_state",
+        },
+    )
+    graph.add_edge("execute_memory_tools", "generate_response")
     graph.add_edge("save_state", END)
 
     # --- Para el segundo turno (confirmación, re-entrada) ---
@@ -191,6 +210,7 @@ def compile_graph(
     store=None,
     calendar_service=None,
     db_service=None,
+    vector_store=None,
     checkpointer=None,
 ):
     """
@@ -204,6 +224,7 @@ def compile_graph(
         store=store,
         calendar_service=calendar_service,
         db_service=db_service,
+        vector_store=vector_store,
     )
 
     if checkpointer:

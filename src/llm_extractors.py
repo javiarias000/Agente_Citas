@@ -293,6 +293,11 @@ async def generate_deyy_response(
             "Ya van muchos mensajes. Considera ofrecer llamar a la clínica."
         )
 
+    # NUEVO: Incluir memorias semánticas (si existen)
+    semantic_memories = state.get("semantic_memory_context", "")
+    if semantic_memories:
+        context_parts.append(f"INFORMACIÓN PREVIA DEL USUARIO:\n{semantic_memories}")
+
     context_str = (
         "\n".join(context_parts) if context_parts else "Sin contexto específico."
     )
