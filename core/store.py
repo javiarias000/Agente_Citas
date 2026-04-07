@@ -145,19 +145,19 @@ class ArcadiumStore:
         )
         return history_copy
 
-    async def add_message(self, session_id: str, message: BaseMessage) -> None:
+    async def add_message(self, session_id: str, message: BaseMessage, project_id: Optional[uuid.UUID] = None) -> None:
         """
         Añade un mensaje al historial.
 
         Args:
             session_id: ID de sesión
             message: Mensaje de LangChain
+            project_id: ID del proyecto (opcional)
         """
         await self.memory_manager.add_message(
             session_id=session_id,
-            content=message.content,
-            message_type="human" if isinstance(message, BaseMessage) and message.__class__.__name__ == "HumanMessage" else "ai",
-            project_id=None  # TODO: manejar project_id
+            message=message,
+            project_id=project_id,
         )
 
         # Invalidate cache

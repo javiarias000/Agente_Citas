@@ -47,9 +47,9 @@ class Conversation(Base):
         comment="Proyecto al que pertenece esta conversación"
     )
     phone_number: Mapped[str] = mapped_column(
-        String(20),
+        String(255),
         nullable=False,
-        comment="Número de teléfono del usuario (formato internacional)"
+        comment="Número de teléfono del usuario (formato internacional) o email para plataformas como Chatwoot"
     )
     platform: Mapped[str] = mapped_column(
         String(50),
@@ -209,7 +209,7 @@ class Appointment(Base):
         comment="Proyecto al que pertenece esta cita"
     )
     phone_number: Mapped[str] = mapped_column(
-        String(20),
+        String(255),
         nullable=False,
         index=True
     )
@@ -352,11 +352,11 @@ class LangchainMemory(Base):
         autoincrement=True,
         nullable=False
     )
-    project_id: Mapped[uuid.UUID] = mapped_column(
+    project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
-        nullable=False,
-        comment="Proyecto al que pertenece esta memoria"
+        nullable=True,
+        comment="Proyecto al que pertenece esta memoria (opcional)"
     )
     session_id: Mapped[str] = mapped_column(
         String(255),
@@ -373,6 +373,12 @@ class LangchainMemory(Base):
         Text,
         nullable=False,
         comment="Contenido del mensaje"
+    )
+    additional_kwargs: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=True,
+        comment="Metadatos adicionales del mensaje (name, function_call, etc.)"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -780,10 +786,10 @@ class UserProfile(Base):
         nullable=False
     )
     phone_number: Mapped[str] = mapped_column(
-        String(20),
+        String(255),
         nullable=False,
         unique=True,
-        comment="Número de teléfono normalizado (formato E.164)"
+        comment="Número de teléfono normalizado o email (formato E.164 para teléfonos)"
     )
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

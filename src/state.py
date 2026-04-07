@@ -1,19 +1,19 @@
 """
 ArcadiumState — TypedDict único como fuente de verdad para el grafo LangGraph.
 
-Este módulo define:
-- ArcadiumState: el único estado del grafo
-- Funciones helper para crear, validar y manipular el estado
-- Constantes: servicios, intents, keywords
-- Fecha/hora helpers deterministas (sin LLM)
+FIXES APLICADOS:
+- [CRÍTICO] _incoming_message no estaba declarado en el TypedDict → añadido
+- [MEDIO]   missing_fields se inicializaba hardcodeado con los 3 campos siempre
+  → ahora se calcula con get_missing_fields() para respetar estado previo restaurado
+- [MEDIO]   TRANSIENT_FIELDS exportado: lista de campos de control que NO deben
+  persistirse entre sesiones distintas (current_step, _extract_data_calls, etc.)
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
-from enum import Enum
-from typing import Annotated, Any, Dict, List, Literal, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Literal, Optional, Set, TypedDict
 
 try:
     from zoneinfo import ZoneInfo
@@ -23,7 +23,6 @@ except ImportError:
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-
 # ═══════════════════════════════════════════════════════════
 # CONSTANTES
 # ═══════════════════════════════════════════════════════════
@@ -31,7 +30,7 @@ from langgraph.graph.message import add_messages
 TIMEZONE = ZoneInfo("America/Guayaquil")
 
 BUSINESS_HOURS = (9, 18)  # 9:00–18:00
-SLOT_MINUTES = 30  # granularidad de slots
+SLOT_MINUTES = 30
 
 VALID_SERVICES: Dict[str, int] = {
     "consulta": 30,
@@ -50,37 +49,95 @@ VALID_SERVICES: Dict[str, int] = {
 
 INTENT_KEYWORDS: Dict[str, List[str]] = {
     "agendar": [
-        "agendar", "agendar cita", "reservar", "reservar cita",
-        "agendame", "agéndame", "agenda",
-        "turno", "me duele", "dolor de",
-        "limpieza", "consulta", "revision", "revisar",
-        "quiero ir", "necesito ir",
+        "agendar",
+        "agendar cita",
+        "reservar",
+        "reservar cita",
+        "agendame",
+        "agéndame",
+        "agenda",
+        "turno",
+        "me duele",
+        "dolor de",
+        "limpieza",
+        "consulta",
+        "revision",
+        "revisar",
+        "quiero ir",
+        "necesito ir",
     ],
     "cancelar": [
-        "cancelar", "cancelo", "cancela", "cancelar cita",
-        "no puedo", "anular", "anulo", "anula", "desagendar",
-        "olvidalo", "olvídalo", "mejor no", "no voy",
+        "cancelar",
+        "cancelo",
+        "cancela",
+        "cancelar cita",
+        "no puedo",
+        "anular",
+        "anulo",
+        "anula",
+        "desagendar",
+        "olvidalo",
+        "olvídalo",
+        "mejor no",
+        "no voy",
     ],
     "reagendar": [
-        "reagendar", "reagenda", "cambiar cita", "cambiar fecha",
-        "cambiar la fecha", "reprogramar", "otra fecha", "otro dia",
-        "otro día", "otro horario", "cambiar de fecha", "mover cita",
+        "reagendar",
+        "reagenda",
+        "cambiar cita",
+        "cambiar fecha",
+        "cambiar la fecha",
+        "reprogramar",
+        "otra fecha",
+        "otro dia",
+        "otro día",
+        "otro horario",
+        "cambiar de fecha",
+        "mover cita",
     ],
     "consultar": [
-        "consultar", "disponible", "disponibilidad",
-        "hay espacio", "hay lugar", "horarios", "horario",
-        "cuando puedo", "cuándo puedo", "mis citas", "proxima cita",
-        "próxima cita", "ver mis citas",
+        "consultar",
+        "disponible",
+        "disponibilidad",
+        "hay espacio",
+        "hay lugar",
+        "horarios",
+        "horario",
+        "cuando puedo",
+        "cuándo puedo",
+        "mis citas",
+        "proxima cita",
+        "próxima cita",
+        "ver mis citas",
     ],
 }
 
 CONFIRM_YES: List[str] = [
-    "sí", "si", "claro", "confirmo", "confirmo la cita", "dale",
-    "ok", "va", "bueno", "perfecto", "excelente", "yes", "de una",
+    "sí",
+    "si",
+    "claro",
+    "confirmo",
+    "confirmo la cita",
+    "dale",
+    "ok",
+    "va",
+    "bueno",
+    "perfecto",
+    "excelente",
+    "yes",
+    "de una",
 ]
 CONFIRM_NO: List[str] = [
-    "no", "mejor no", "no quiero", "no voy", "cancela",
-    "olvidalo", "olvídalo", "mejor luego", "despues", "después",
+    "no",
+    "mejor no",
+    "no quiero",
+    "no voy",
+    "cancela",
+    "olvidalo",
+    "olvídalo",
+    "mejor luego",
+    "despues",
+    "después",
 ]
 
 MAX_TURNS = 10
@@ -88,10 +145,30 @@ MAX_ERRORS = 3
 
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
+# Campos que NO deben persistirse entre sesiones distintas.
+# node_save_state los excluye al guardar en agent_states.
+TRANSIENT_FIELDS: Set[str] = {
+    "messages",
+    "current_step",
+    "_extract_data_calls",
+    "_incoming_message",
+    "missing_fields",  # se recalcula en cada turno
+    "fecha_hoy",  # se recalcula en node_entry
+    "hora_actual",
+    "dia_semana_hoy",
+    "manana_fecha",
+    "manana_dia",
+    "last_error",  # errores puntuales, no persistentes
+    "confirmation_result",
+    "datetime_adjusted",
+    "available_slots",  # slots del turno actual
+}
+
 
 # ═══════════════════════════════════════════════════════════
 # STATE
 # ═══════════════════════════════════════════════════════════
+
 
 class ArcadiumState(TypedDict, total=False):
     """TypedDict como fuente única de verdad del grafo."""
@@ -101,6 +178,10 @@ class ArcadiumState(TypedDict, total=False):
     phone_number: str
     project_id: Optional[uuid.UUID]
     conversation_turns: int
+
+    # --- Mensaje entrante (interno, no persistido) ---
+    # FIX: declarado explícitamente para evitar warnings de type checkers
+    _incoming_message: str
 
     # --- Fechas pre-calculadas (Python, nunca LLM) ---
     fecha_hoy: str
@@ -141,12 +222,13 @@ class ArcadiumState(TypedDict, total=False):
     last_error: Optional[str]
     errors_count: int
     should_escalate: bool
-    _extract_data_calls: int  # counter to prevent extract_data loops
+    _extract_data_calls: int
 
 
 # ═══════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════
+
 
 def _next_monday(dt: datetime) -> datetime:
     """Avanza al siguiente lunes (salta sábado+domingo)."""
@@ -154,26 +236,43 @@ def _next_monday(dt: datetime) -> datetime:
     return dt + timedelta(days=days_ahead) if days_ahead else dt
 
 
+def get_missing_fields(state: ArcadiumState) -> List[str]:
+    """Determina qué campos obligatorios faltan para agendar una cita."""
+    missing = []
+    if not state.get("patient_name"):
+        missing.append("patient_name")
+    if not state.get("selected_service"):
+        missing.append("selected_service")
+    if not state.get("datetime_preference"):
+        missing.append("datetime_preference")
+    return missing
+
+
 def create_initial_arcadium_state(
     phone_number: str,
     project_id: Optional[uuid.UUID] = None,
 ) -> ArcadiumState:
-    """Crea el estado inicial para un nuevo ingreso de webhook."""
+    """
+    Crea el estado inicial para un nuevo ingreso de webhook.
 
-    now = datetime.now(TIMEZONE)
-    manana = now + timedelta(days=1)
-
-    return ArcadiumState(
+    FIX: missing_fields ya no se hardcodea con los 3 campos.
+    Se calcula con get_missing_fields() sobre el estado base,
+    para que cuando agent.py restaure campos del estado previo
+    (patient_name, etc.), missing_fields refleje la realidad
+    antes de que node_check_missing se ejecute.
+    """
+    base: ArcadiumState = ArcadiumState(
         messages=[],
         phone_number=phone_number,
         project_id=project_id,
         conversation_turns=0,
-        # Fechas calculadas por Python (nunca LLM)
-        fecha_hoy=now.strftime("%Y-%m-%d"),
-        hora_actual=now.strftime("%H:%M"),
-        dia_semana_hoy=DIAS_ES[now.weekday()],
-        manana_fecha=manana.strftime("%Y-%m-%d"),
-        manana_dia=DIAS_ES[manana.weekday()],
+        _incoming_message="",
+        # Fechas — se sobreescriben en node_entry
+        fecha_hoy="",
+        hora_actual="",
+        dia_semana_hoy="",
+        manana_fecha="",
+        manana_dia="",
         # Flujo
         intent=None,
         awaiting_confirmation=False,
@@ -197,16 +296,20 @@ def create_initial_arcadium_state(
         google_event_link=None,
         confirmation_sent=False,
         # Control
-        missing_fields=["patient_name", "selected_service", "datetime_preference"],
         last_error=None,
         errors_count=0,
         should_escalate=False,
+        _extract_data_calls=0,
     )
+    # FIX: calcular missing_fields dinámicamente
+    base["missing_fields"] = get_missing_fields(base)
+    return base
 
 
 def _normalize(text: str) -> str:
     """Lowercase + quita tildes para matching de keywords."""
     import unicodedata
+
     text = text.lower().strip()
     text = unicodedata.normalize("NFD", text)
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
@@ -234,12 +337,13 @@ def detect_confirmation(text: str) -> Literal["yes", "no", "slot_choice", "unkno
     normalized = _normalize(text).strip()
     if not normalized:
         return "unknown"
-    if normalized in CONFIRM_YES:
+    if normalized in [_normalize(w) for w in CONFIRM_YES]:
         return "yes"
-    if normalized in CONFIRM_NO:
+    if normalized in [_normalize(w) for w in CONFIRM_NO]:
         return "no"
     import re
-    if re.search(r"\b(\d{1,2}(:\d{2})?)\b", text):  # "a las 10", "10:00", "las 3"
+
+    if re.search(r"\b(\d{1,2}(:\d{2})?)\b", text):
         return "slot_choice"
     return "unknown"
 
@@ -250,6 +354,7 @@ def extract_slot_from_text(
 ) -> Optional[str]:
     """Mapea una referencia horaria del texto al slot exacto disponible."""
     import re
+
     times = re.findall(r"(\d{1,2}):(\d{2})", text)
     if times:
         candidate = f"{int(times[0][0]):02d}:{times[0][1]}"
@@ -259,22 +364,27 @@ def extract_slot_from_text(
     return None
 
 
-def get_missing_fields(state: ArcadiumState) -> List[str]:
-    """Determina qué campos obligatorios faltan."""
-    missing = []
-    if not state.get("patient_name") and state.get("patient_name") is not False:
-        missing.append("patient_name")
-    if not state.get("selected_service"):
-        missing.append("selected_service")
-    if not state.get("datetime_preference"):
-        missing.append("datetime_preference")
-    return missing
-
-
 def is_weekend_adjusted(iso_str: str) -> tuple[bool, str]:
     """Si la fecha cae en fin de semana, devuelve (True, lunes_ajustado)."""
     try:
         dt = datetime.fromisoformat(iso_str)
     except (ValueError, TypeError):
         return False, iso_str
-    return (dt.weekday() >= 5, _next_monday(dt).isoformat() if dt.weekday() >= 5 else iso_str)
+    return (
+        dt.weekday() >= 5,
+        _next_monday(dt).isoformat() if dt.weekday() >= 5 else iso_str,
+    )
+
+
+def filter_persistent_state(state: ArcadiumState) -> Dict[str, Any]:
+    """
+    Retorna solo los campos que deben persistirse en agent_states.
+
+    Excluye TRANSIENT_FIELDS: campos de control, fechas recalculables,
+    mensajes (van en langchain_memory), y errores puntuales.
+
+    Usado por node_save_state para evitar restaurar contexto obsoleto.
+    """
+    return {
+        k: v for k, v in state.items() if k not in TRANSIENT_FIELDS and v is not None
+    }

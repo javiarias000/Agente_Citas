@@ -1,0 +1,125 @@
+"""
+ArcadiumAgent — entry point de alto nivel.
+
+Reemplaza DeyyAgent + StateMachineAgent.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import uuid
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+import structlog
+
+from src.state import create_initial_arcadium_state
+
+logger = structlog.get_logger("langgraph.agent")
+
+
+@dataclass
+class AgentResponse:
+    """Respuesta estandarizada del agente."""
+
+    text: str
+    appointment_id: Optional[str] = None
+    google_event_link: Optional[str] = None
+    status: str = "ok"  # ok | error | escalated
+    intent: Optional[str] = None
+    should_escalate: bool = False
+
+
+class ArcadiumAgent:
+    """
+    Agente principal Arcadium sobre LangGraph.
+
+    Uso:
+        agent = ArcadiumAgent(
+            session_id="deyy_+593999999999",
+            graph=compiled_graph,
+            store=postgres_store,
+        )
+        resp = await agent.process_message("Quiero agendar una limpieza mañana")
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        graph,
+        store,
+        llm=None,
+        calendar_service=None,
+        db_service=None,
+        project_id: Optional[uuid.UUID] = None,
+    ):
+        self.session_id = session_id
+        self.graph = graph
+        self.store = store
+        self.llm = llm
+        self.calendar_service = calendar_service
+        self.db_service = db_service
+        self.project_id = project_id
+        self._initialized = False
+        self._lock = asyncio.Lock()
+        self._phone_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+            "phone", default=None
+        )
+
+    async def initialize(self) -> None:
+        """Inicialización thread-safe."""
+        async with self._lock:
+            if not self._initialized:
+                await self.store.initialize()
+                self._initialized = True
+                logger.info("ArcadiumAgent inicializado", session_id=self.session_id)
+
+    async def process_message(self, message: str) -> AgentResponse:
+    await self.initialize()
+
+    phone = self.session_id.replace("deyy_", "")
+    self._phone_var.set(phone)
+
+    # FIX: NO cargar historial aquí. node_entry lo hace.
+    # Solo construir el estado inicial con el mensaje nuevo.
+    state = create_initial_arcadium_state(phone_number=phone, project_id=self.project_id)
+    state["_incoming_message"] = message
+    state["conversation_turns"] = 0  # node_entry lo incrementa
+
+    # Restaurar campos persistentes del estado previo
+    prev_state = await self.store.get_agent_state(phone)
+    if prev_state:
+        for f in [
+            "patient_name", "selected_service", "service_duration",
+            "intent", "datetime_preference", "available_slots",
+            "selected_slot", "appointment_id", "google_event_id",
+            "google_event_link", "conversation_turns",
+            "awaiting_confirmation", "confirmation_type", "errors_count",
+        ]:
+            if f in prev_state and prev_state[f] is not None:
+                state[f] = prev_state[f]
+
+    config = {"configurable": {"thread_id": self.session_id}}
+    try:
+        result = await self.graph.ainvoke(input=state, config=config)
+    except Exception as e:
+        logger.error("Error invocando grafo", error=str(e), exc_info=True)
+        return AgentResponse(
+            text="Lo siento, hubo un error técnico. Por favor llame a la clínica. 📞",
+            status="error",
+        )
+
+    return self._extract_response(result)
+
+    def _extract_response(self, state: Dict[str, Any]) -> AgentResponse:
+        """Extrae AgentResponse del estado final del grafo."""
+        messages = state.get("messages", [])
+        text = ""
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) == "ai":
+                text = msg.content
+                break
+
+        if not text:
+            text = "Lo siento, no pude procesa

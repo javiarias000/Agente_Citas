@@ -28,8 +28,9 @@ class ChatwootMessage:
         self,
         conversation_id: str,
         content: str,
-        message_type: str = "text",
-        private: bool = False
+        message_type: str = "outgoing",
+        private: bool = False,
+        sender_type: str = "agent"  # 'contact', 'agent', 'system'
     ):
         """
         Args:
@@ -37,18 +38,22 @@ class ChatwootMessage:
             content: Contenido del mensaje (texto o URL)
             message_type: Tipo de mensaje ('text', 'image', 'file', etc.)
             private: Si el mensaje es privado (solo agente)
+            sender_type: Tipo de remitente ('agent' para mensajes del sistema, 'contact' para usuarios)
         """
         self.conversation_id = conversation_id
         self.content = content
         self.message_type = message_type
         self.private = private
+        self.sender_type = sender_type
 
     def to_payload(self) -> Dict[str, Any]:
         """Convierte a formato Chatwoot API"""
         payload = {
             "content": self.content,
             "message_type": self.message_type,
-            "private": self.private
+            "content_type": "text",
+            "private": self.private,
+            "sender_type": self.sender_type
         }
         return payload
 
@@ -203,7 +208,7 @@ class ChatwootService:
         message = ChatwootMessage(
             conversation_id=conversation_id,
             content=text,
-            message_type="text",
+            message_type="outgoing",
             private=private
         )
         return await self.send_message(message)
@@ -278,12 +283,53 @@ class ChatwootService:
                 sender_type=sender_type
             )
 
-            # Ignorar mensajes del agente (evitar loops)
-            if sender_type == "agent":
+            # ═══════════════════════════════════════════════════════════
+            # FILTROS ANTI-LOOP (múltiples capas de defensa)
+            # ═══════════════════════════════════════════════════════════
+
+            # 1. Filtrar por tipo de evento (solo procesar mensajes creados)
+            if event != "message_created":
                 logger.info(
-                    "Ignorando mensaje del agente (loop prevention)",
+                    "Ignorando evento no manejado",
+                    event=event,
+                    message_id=message_id
+                )
+                return None
+
+            # 2. Filtrar por message_type (solo incoming = del usuario)
+            # outgoing = mensaje saliente del agente/bot
+            if message_type != "incoming":
+                logger.info(
+                    "Ignorando mensaje saliente (anti-loop)",
+                    message_type=message_type,
                     message_id=message_id,
-                    conversation_id=conversation_id
+                    sender_type=sender_type
+                )
+                return None
+
+            # 3. Filtrar por sender_type (seguro adicional)
+            # 'contact' = usuario, 'agent'/'agent_bot' = bot
+            if sender_type in ("agent", "agent_bot", "system"):
+                logger.info(
+                    "Ignorando mensaje del agente por sender_type (anti-loop)",
+                    sender_type=sender_type,
+                    message_id=message_id
+                )
+                return None
+
+            # 4. Validar datos requeridos
+            if not conversation_id:
+                logger.warning(
+                    "Webhook de Chatwoot sin conversation_id",
+                    conversation=conversation
+                )
+                return None
+
+            if not content:
+                logger.warning(
+                    "Webhook de Chatwoot sin contenido",
+                    message_id=message_id,
+                    content_present=bool(content)
                 )
                 return None
 

@@ -2,6 +2,15 @@
 ArcadiumAgent — entry point de alto nivel.
 
 Reemplaza DeyyAgent + StateMachineAgent.
+
+FIXES APLICADOS:
+- [CRÍTICO] process_message cargaba historial aquí Y en node_entry → doble carga
+  que causaba que el agente olvidara la conversación a partir del 2do mensaje.
+  → Ahora solo se pasa _incoming_message. node_entry es el único responsable
+    de cargar el historial desde el store.
+- [MEDIO] La persistencia de mensajes nuevos se hacía aquí Y en node_save_state
+  → mensajes duplicados en el store.
+  → Se elimina de aquí; node_save_state es el único responsable.
 """
 
 from __future__ import annotations
@@ -9,12 +18,12 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 import structlog
 
-from src.state import create_initial_arcadium_state, TIMEZONE
+from src.state import create_initial_arcadium_state
 
 logger = structlog.get_logger("langgraph.agent")
 
@@ -52,6 +61,7 @@ class ArcadiumAgent:
         llm=None,
         calendar_service=None,
         db_service=None,
+        project_id: Optional[uuid.UUID] = None,
     ):
         self.session_id = session_id
         self.graph = graph
@@ -59,10 +69,11 @@ class ArcadiumAgent:
         self.llm = llm
         self.calendar_service = calendar_service
         self.db_service = db_service
+        self.project_id = project_id
         self._initialized = False
         self._lock = asyncio.Lock()
-        self._phone_var: contextvars.ContextVar[Optional[str]] = (
-            contextvars.ContextVar("phone", default=None)
+        self._phone_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+            "phone", default=None
         )
 
     async def initialize(self) -> None:
@@ -79,63 +90,60 @@ class ArcadiumAgent:
 
         Flujo:
         1. Normaliza teléfono
-        2. Establece ContextVars
-        3. Carga estado previo del store
-        4. Invoca el grafo
+        2. Construye estado inicial SOLO con el mensaje nuevo (_incoming_message)
+        3. Restaura campos persistentes del estado previo (sin historial de mensajes)
+        4. Invoca el grafo — node_entry es el responsable de cargar el historial
         5. Extrae la respuesta y retorna AgentResponse
+
+        FIX: Ya NO se carga historial aquí. Hacerlo causaba que node_entry
+        recibiera state["messages"] con datos, entrara al bloque
+        `if history and not state.get("messages")` como False, y nunca
+        mergeara el historial → el agente olvidaba la conversación.
         """
         await self.initialize()
 
         # Extraer teléfono del session_id
         phone = self.session_id.replace("deyy_", "")
-
-        # ContextVar
         self._phone_var.set(phone)
 
-        # Construir estado inicial
-        state = create_initial_arcadium_state(phone_number=phone)
+        # Construir estado inicial vacío
+        state = create_initial_arcadium_state(
+            phone_number=phone,
+            project_id=self.project_id,
+        )
 
-        # Cargar historial y estado previo
-        history = await self.store.get_history(phone, limit=50)
-        prev_state = await self.store.get_agent_state(phone)
+        # FIX: pasar el mensaje nuevo via _incoming_message, NO via messages.
+        # node_entry construirá: historial_del_store + [HumanMessage(incoming)]
+        state["_incoming_message"] = message
+        state["conversation_turns"] = 0  # node_entry lo incrementa
 
-        if history:
-            state["messages"] = list(history)
-
-        if prev_state:
-            # Restaurar campos persistentes
-            for field in [
-                "patient_name",
-                "selected_service",
-                "service_duration",
-                "intent",
-                "datetime_preference",
-                "available_slots",
-                "selected_slot",
-                "appointment_id",
-                "google_event_id",
-                "google_event_link",
-                "conversation_turns",
-                "awaiting_confirmation",
-                "confirmation_type",
-                "errors_count",
-            ]:
-                if field in prev_state and prev_state[field] is not None:
-                    state[field] = prev_state[field]
-
-        # Agregar el mensaje entrante al estado
-        from langchain_core.messages import HumanMessage
-
-        state["messages"] = state.get("messages", []) + [HumanMessage(content=message)]
-        state["conversation_turns"] = state.get("conversation_turns", 0) + 1
-
-        # Verificar escalación por número de turns
-        if state["conversation_turns"] >= 10:
-            state["should_escalate"] = True
+        # Restaurar campos persistentes del estado previo (NO mensajes)
+        try:
+            prev_state = await self.store.get_agent_state(phone)
+            if prev_state:
+                for f in [
+                    "patient_name",
+                    "selected_service",
+                    "service_duration",
+                    "intent",
+                    "datetime_preference",
+                    "available_slots",
+                    "selected_slot",
+                    "appointment_id",
+                    "google_event_id",
+                    "google_event_link",
+                    "conversation_turns",
+                    "awaiting_confirmation",
+                    "confirmation_type",
+                    "errors_count",
+                ]:
+                    if f in prev_state and prev_state[f] is not None:
+                        state[f] = prev_state[f]
+        except Exception as e:
+            logger.warning("No se pudo cargar estado previo", error=str(e))
 
         # Invocar grafo
         config = {"configurable": {"thread_id": self.session_id}}
-
         try:
             result = await self.graph.ainvoke(input=state, config=config)
         except Exception as e:
@@ -145,7 +153,9 @@ class ArcadiumAgent:
                 status="error",
             )
 
-        # Extraer respuesta
+        # FIX: NO persistir mensajes aquí. node_save_state ya lo hace.
+        # Hacerlo en ambos lados causaba mensajes duplicados en el store.
+
         return self._extract_response(result)
 
     def _extract_response(self, state: Dict[str, Any]) -> AgentResponse:

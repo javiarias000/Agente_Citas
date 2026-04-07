@@ -61,7 +61,7 @@ async def migrate_states(engine, dry_run: bool = False) -> Dict[str, int]:
             else:
                 # Guardar nuevo estado
                 upsert_sql = text(
-                    "UPDATE agent_states SET state = :data::jsonb "
+                    "UPDATE agent_states SET state = :data "
                     "WHERE session_id = :sid"
                 )
                 await conn.execute(

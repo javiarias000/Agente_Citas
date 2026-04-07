@@ -75,10 +75,11 @@ class PostgresStorage:
 
             history = []
             for record in records:
+                additional_kwargs = record.additional_kwargs or {}
                 if record.type == "human":
-                    history.append(HumanMessage(content=record.content))
+                    history.append(HumanMessage(content=record.content, additional_kwargs=additional_kwargs))
                 elif record.type == "ai":
-                    history.append(AIMessage(content=record.content))
+                    history.append(AIMessage(content=record.content, additional_kwargs=additional_kwargs))
 
             if len(history) != len(records):
                 logger.warning(
@@ -120,11 +121,13 @@ class PostgresStorage:
         from db import get_async_session
 
         async with get_async_session() as session:
+            additional_kwargs = getattr(message, 'additional_kwargs', None) or {}
             record = LangchainMemory(
                 session_id=session_id,
                 project_id=project_id,
                 type=msg_type,
                 content=message.content,
+                additional_kwargs=additional_kwargs,
                 created_at=datetime.now(timezone.utc),
             )
             session.add(record)
