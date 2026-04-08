@@ -194,8 +194,13 @@ async def node_entry(
             history = await store.get_history(phone, limit=50)
             logger.info("node_entry: historial cargado", phone=phone, history_len=len(history))
             updates["messages"] = list(history) + [new_message]
+            # Registrar cuántos mensajes existían antes de este turno.
+            # node_save_state usará este valor para guardar SOLO los mensajes nuevos.
+            updates["_history_len"] = len(history)
 
-            # Restaurar campos persistentes que no vinieron en el estado
+            # Restaurar campos persistentes desde el estado guardado.
+            # IMPORTANTE: Sobrescribir SIEMPRE los valores del estado previo
+            # (el state actual viene vacío/None por defecto en cada turno nuevo)
             prev_state = await store.get_agent_state(phone)
             if prev_state:
                 for f in [
@@ -207,8 +212,10 @@ async def node_entry(
                     "patient_phone",
                     "appointment_id",
                     "google_event_id",
+                    "awaiting_confirmation",
+                    "confirmation_type",
                 ]:
-                    if f in prev_state and not state.get(f):
+                    if f in prev_state and prev_state[f] is not None:
                         updates[f] = prev_state[f]
 
         except Exception as e:
@@ -493,13 +500,20 @@ async def node_save_state(
 
         await store.save_agent_state(phone, filter_persistent_state(state))
 
-        # Persistir mensajes nuevos (HumanMessage y AIMessage únicamente)
+        # Persistir SOLO los mensajes nuevos del turno actual.
+        # _history_len indica cuántos mensajes existían en el store ANTES de este turno
+        # (registrado por node_entry). Todo lo que está en índices >= _history_len
+        # es nuevo: el HumanMessage entrante + la respuesta AI + tool messages.
+        # Esto evita re-guardar el historial completo en cada turno (bug de duplicados).
         messages = state.get("messages", [])
+        history_len = state.get("_history_len", 0)
+        new_messages = messages[history_len:]
+
         from langchain_core.messages import AIMessage
         from langchain_core.messages import HumanMessage as HM
 
         saved_count = 0
-        for msg in messages:
+        for msg in new_messages:
             if isinstance(msg, (HM, AIMessage)):
                 try:
                     await store.add_message(
@@ -508,7 +522,13 @@ async def node_save_state(
                     saved_count += 1
                 except Exception as e:
                     logger.warning("Error guardando mensaje", error=str(e))
-        logger.info("node_save_state: mensajes guardados", phone=phone, count=saved_count)
+        logger.info(
+            "node_save_state: mensajes guardados",
+            phone=phone,
+            count=saved_count,
+            history_len=history_len,
+            total_messages=len(messages),
+        )
 
         # Actualizar perfil del usuario
         profile_updates = {}

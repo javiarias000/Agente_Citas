@@ -152,6 +152,7 @@ TRANSIENT_FIELDS: Set[str] = {
     "current_step",
     "_extract_data_calls",
     "_incoming_message",
+    "_history_len",     # cuántos mensajes había en el store al inicio del turno
     "missing_fields",  # se recalcula en cada turno
     "fecha_hoy",  # se recalcula en node_entry
     "hora_actual",
@@ -225,6 +226,8 @@ class ArcadiumState(TypedDict, total=False):
     errors_count: int
     should_escalate: bool
     _extract_data_calls: int
+    _history_len: int       # mensajes pre-existentes en el store al inicio del turno
+    _tool_iterations: int
 
 
 # ═══════════════════════════════════════════════════════════
