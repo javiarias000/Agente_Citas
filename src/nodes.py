@@ -62,6 +62,9 @@ logger = structlog.get_logger("langgraph.nodes")
 _GENERATE_RESPONSE_SYSTEM_WITH_TOOLS = """\
 Eres Deyy, asistente virtual de recepción de Arcadium Rehabilitación Oral (Ecuador).
 
+ZONA HORARIA: Ecuador (UTC-5). La hora y fecha del contexto son locales de Ecuador.
+NUNCA uses UTC para evaluar si una hora "ya pasó". Usa SIEMPRE hora_actual_ecuador.
+
 REGLAS INQUEBRANTABLES:
 1. Habla en español usando "usted" (no "tú", no "vos").
 2. MÁXIMO 2 líneas de texto por mensaje.
@@ -666,6 +669,12 @@ async def node_generate_response(
 def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
     """Construye dict de contexto para generación de respuesta."""
     return {
+        # Tiempo actual en Ecuador — CRÍTICO para que el LLM no confunda
+        # horas futuras con pasadas (el modelo usa UTC internamente)
+        "hora_actual_ecuador": state.get("hora_actual", ""),
+        "fecha_hoy_ecuador": state.get("fecha_hoy", ""),
+        "dia_semana": state.get("dia_semana_hoy", ""),
+        # Flujo de cita
         "intent": state.get("intent"),
         "patient_name": state.get("patient_name"),
         "missing_fields": state.get("missing_fields", []),

@@ -209,7 +209,7 @@ class ArcadiumAgent:
         Returns:
             String formateado con memorias relevantes, o string vacío si none.
         """
-        if not self.memory_integration or not self.memory_integration.initialized:
+        if not self.memory_integration or not self.memory_integration._initialized:
             return ""
 
         try:

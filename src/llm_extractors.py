@@ -36,8 +36,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 logger = structlog.get_logger("langgraph.llm")
 
 # Número de mensajes del historial a incluir en cada llamada LLM
-_HISTORY_WINDOW = 6  # últimos 6 mensajes (3 turnos de conversación)
-_INTENT_WINDOW = 3  # menos contexto para clasificación de intención
+_HISTORY_WINDOW = 20  # últimos 20 mensajes (~10 turnos de conversación)
+_INTENT_WINDOW = 6    # últimos 6 mensajes para clasificación de intención
 
 
 # ═══════════════════════════════════════════
@@ -111,6 +111,9 @@ async def extract_intent_llm(
 _EXTRACT_DATA_SYSTEM = """\
 Eres un extractor de datos para agendar citas dentales.
 
+ZONA HORARIA: Ecuador (UTC-5). Las horas del contexto son locales.
+NUNCA uses UTC para evaluar si una hora ya pasó. Usa la hora_actual del contexto.
+
 INSTRUCCIONES:
 1. Extrae SOLO lo que el usuario dijo explícitamente. NO inventes.
 2. Para fechas relativas, usa las fechas de referencia del contexto.
@@ -121,8 +124,9 @@ INSTRUCCIONES:
    extraccion, endodoncia, ortodoncia, cirugia, implantes, estetica,
    odontopediatria, blanqueamiento, revision.
    Si no coincide exactamente, elige el más cercano.
-4. El nombre solo se extrae si el usuario se presentó ("soy Juan", "me llamo María").
-   También revisa el historial — si el usuario ya dijo su nombre antes, úsalo.
+4. Para el nombre: revisa TODO el historial. Si el asistente preguntó el nombre y el
+   usuario respondió (cualquier texto que parece un nombre propio), úsalo.
+   No requiere que se presente formalmente — basta con que haya respondido a la pregunta.
 5. Retorna SOLO JSON, sin markdown.
 
 Formato de respuesta:

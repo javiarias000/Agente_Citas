@@ -303,8 +303,8 @@ class PostgresStore(BaseStore):
         persistent = filter_persistent_state(state)
 
         sql = text(
-            "INSERT INTO agent_states (session_id, state, updated_at) "
-            "VALUES (:sid, :data, now()) "
+            "INSERT INTO agent_states (id, session_id, state, created_at, updated_at) "
+            "VALUES (gen_random_uuid(), :sid, :data, now(), now()) "
             "ON CONFLICT (session_id) DO UPDATE "
             "SET state = :data, updated_at = now()"
         )
