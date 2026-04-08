@@ -201,28 +201,26 @@ class ArcadiumAPI:
         try:
             from langchain_openai import ChatOpenAI
             from src.graph import compile_graph
-            from src.store import PostgresStore as StateStore
+            from memory_agent_integration.memory_agent_backend import MemoryAgentBackend
 
-            # 1. State Store (para historial y estado del agente)
-            self.state_store = StateStore(self.db.engine)
+            # 1. Backend unificado: historial secuencial + vector store semántico.
+            #    Reemplaza el PostgresStore + vector_store separados anteriores.
+            self.state_store = MemoryAgentBackend(
+                settings=self.settings,
+                engine=self.db.engine,
+            )
             await self.state_store.initialize()
 
-            # 2. Vector Store (para memorias semánticas) - opcional
-            self.vector_store = None
-            if self.settings.USE_MEMORY_AGENT:
-                from memory_agent_integration.config import get_memory_agent_config
-                mem_cfg = get_memory_agent_config()
-                await mem_cfg.initialize()
-                self.vector_store = mem_cfg.get_store()
-                logger.info("Memory-Agent vector store inicializado", store_type=type(self.vector_store).__name__)
+            # Exponer el vector store interno para los nodos del grafo
+            self.vector_store = self.state_store.store if self.settings.USE_MEMORY_AGENT else None
 
-            # 3. LLM
+            # 2. LLM
             self.langgraph_llm = ChatOpenAI(
                 model=self.settings.LANGGRAPH_MODEL,
                 temperature=self.settings.LANGGRAPH_TEMPERATURE,
             )
 
-            # 4. Compilar grafo
+            # 3. Compilar grafo
             self.langgraph_graph = compile_graph(
                 llm=self.langgraph_llm,
                 store=self.state_store,
@@ -231,9 +229,11 @@ class ArcadiumAPI:
                 db_service=None,
             )
 
-            logger.info("LangGraph components inicializados",
-                       state_store=type(self.state_store).__name__,
-                       vector_store=type(self.vector_store).__name__ if self.vector_store else None)
+            logger.info(
+                "LangGraph components inicializados",
+                state_store=type(self.state_store).__name__,
+                vector_store=type(self.vector_store).__name__ if self.vector_store else None,
+            )
         except Exception as e:
             logger.error("Error inicializando LangGraph", error=str(e), exc_info=True)
             raise
@@ -245,12 +245,19 @@ class ArcadiumAPI:
     ) -> Any:
         from src.agent import ArcadiumAgent
 
+        # memory_integration activa la búsqueda semántica por turno.
+        # Solo se pasa cuando USE_MEMORY_AGENT=True (feature flag).
+        memory_integration = (
+            self.state_store if self.settings.USE_MEMORY_AGENT else None
+        )
+
         return ArcadiumAgent(
             session_id=f"deyy_{session_id}",
             graph=self.langgraph_graph,
-            store=self.state_store,  # State store para historial y estado
+            store=self.state_store,
             llm=self.langgraph_llm,
             project_id=project_id,
+            memory_integration=memory_integration,
         )
 
     async def _load_default_project(self) -> None:

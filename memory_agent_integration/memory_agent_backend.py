@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-Backend de memoria híbrido: combina PostgreSQL secuencial + Store vectorial.
+Backend de memoria híbrido: combina historial secuencial + store vectorial semántico.
 
-Este backend:
-- Usa PostgreSQLMemory (langchain) para historial secuencial de mensajes
-- Usa BaseStore (langgraph) para memorias semánticas vectoriales
-- Proporciona una interfaz unificada para el agente
+Implementa la interfaz BaseStore de src/store.py como drop-in replacement de
+PostgresStore, agregando búsqueda semántica a través del vector store de LangGraph.
+
+Arquitectura:
+- sequential_backend (src/store.PostgresStore o InMemoryStore)
+    → historial de conversación (langchain_memory)
+    → estado persistente del agente (agent_states)
+    → perfil de usuario (user_profiles)
+- store (langgraph.store.BaseStore)
+    → memorias semánticas vectoriales (facts, preferencias, datos del paciente)
 """
 
 import uuid
 from typing import Any, Dict, List, Optional
 
 import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-
-# Importar backends existentes
-from memory.memory_manager import InMemoryStorage, PostgreSQLMemory
+from langchain_core.messages import BaseMessage
 
 logger = structlog.get_logger("memory_agent_backend")
 
@@ -23,133 +26,183 @@ logger = structlog.get_logger("memory_agent_backend")
 class MemoryAgentBackend:
     """
     Backend híbrido que combina:
-    - PostgreSQL secuencial (langchain_memory table) → historial de conversación
-    - Store vectorial (langgraph.store) → memorias semánticas
+    - PostgresStore/InMemoryStore (src/store.py) → historial + estado + perfil
+    - LangGraph BaseStore vectorial               → memorias semánticas
 
-    Atributos:
-        settings: Configuración de la aplicación
-        store: BaseStore para memorias vectoriales (inicializado en initialize())
-        sequential_backend: InMemoryStorage o PostgreSQLMemory (historial secuencial)
+    Es un drop-in replacement del PostgresStore: implementa la misma interfaz
+    y puede pasarse directamente a ArcadiumAgent y compile_graph.
+
+    Args:
+        settings:  Configuración de la aplicación (get_settings()).
+        engine:    SQLAlchemy async engine. Requerido si USE_POSTGRES_FOR_MEMORY=True.
     """
 
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, engine=None):
         from core.config import get_settings
 
         self.settings = settings or get_settings()
-        self.store = None  # BaseStore (inicializado en initialize())
-        self.sequential_backend = None  # Inicializado en initialize()
+        self._engine = engine
+        self.store = None               # LangGraph BaseStore (vector store)
+        self.sequential_backend = None  # src/store.BaseStore (historial + estado)
         self._initialized = False
         self._lock = None
 
         logger.info(
             "MemoryAgentBackend creado",
             store_type=self.settings.MEMORY_AGENT_STORE_TYPE,
+            use_postgres=self.settings.USE_POSTGRES_FOR_MEMORY,
         )
 
-    async def initialize(self):
-        """Inicializa el store vectorial y el backend secuencial."""
+    # ─────────────────────────────────────────────────────────────────────────
+    # Inicialización
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def initialize(self) -> None:
+        """Inicializa el sequential backend y el vector store."""
         import asyncio
 
-        from langgraph.store.memory import InMemoryStore as LGInMemoryStore
-
-        # Crear lock
         if self._lock is None:
             self._lock = asyncio.Lock()
 
-        # 1. Inicializar store vectorial (memory-agent)
-        from memory_agent_integration.config import get_memory_agent_config
+        async with self._lock:
+            if self._initialized:
+                return
 
-        mem_config = get_memory_agent_config()
-        await mem_config.initialize()
-        self.store = mem_config.get_store()
+            # 1. Sequential backend (historial + estado + perfil)
+            if self.settings.USE_POSTGRES_FOR_MEMORY:
+                if self._engine is None:
+                    raise RuntimeError(
+                        "MemoryAgentBackend requiere 'engine' cuando USE_POSTGRES_FOR_MEMORY=True"
+                    )
+                from src.store import PostgresStore
+                self.sequential_backend = PostgresStore(self._engine)
+            else:
+                from src.store import InMemoryStore
+                self.sequential_backend = InMemoryStore()
 
-        # 2. Inicializar backend secuencial (PostgreSQLMemory o InMemory)
-        if self.settings.USE_POSTGRES_FOR_MEMORY:
-            from memory.postgres_memory import PostgreSQLMemory as PGMemory
-            self.sequential_backend = PGMemory()
-        else:
-            self.sequential_backend = InMemoryStorage()
-
-        # Inicializar el backend secuencial si es necesario
-        if hasattr(self.sequential_backend, 'initialize'):
             await self.sequential_backend.initialize()
 
-        self._initialized = True
-        logger.info(
-            "MemoryAgentBackend inicializado",
-            store=type(self.store).__name__,
-            sequential=type(self.sequential_backend).__name__,
-        )
+            # 2. Vector store (memorias semánticas) — siempre InMemoryStore por defecto.
+            #    Se reemplaza por PostgreSQLStore si MEMORY_AGENT_STORE_TYPE=postgres.
+            from memory_agent_integration.config import get_memory_agent_config
+            mem_cfg = get_memory_agent_config()
+            await mem_cfg.initialize()
+            self.store = mem_cfg.get_store()
 
-    # ============ API para historial secuencial (compatible con BaseMemory) ============
+            self._initialized = True
+            logger.info(
+                "MemoryAgentBackend inicializado",
+                sequential=type(self.sequential_backend).__name__,
+                vector_store=type(self.store).__name__,
+            )
 
-    async def get_history(
-        self,
-        session_id: str,
-        project_id: Optional[uuid.UUID] = None,
-        limit: Optional[int] = None,
-    ) -> List[BaseMessage]:
-        """Obtiene historial de mensajes (usando sequential_backend)."""
+    # ─────────────────────────────────────────────────────────────────────────
+    # Historial de conversación (delega a sequential_backend)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def get_history(self, phone: str, limit: int = 50) -> List[BaseMessage]:
+        """Obtiene los últimos `limit` mensajes del historial."""
         if not self._initialized:
             await self.initialize()
-        return await self.sequential_backend.get_history(session_id, project_id, limit)
+        return await self.sequential_backend.get_history(phone, limit)
 
     async def add_message(
         self,
-        session_id: str,
+        phone: str,
         message: BaseMessage,
         project_id: Optional[uuid.UUID] = None,
     ) -> None:
-        """Añade un mensaje al historial secuencial."""
+        """Agrega un mensaje al historial."""
         if not self._initialized:
             await self.initialize()
-        return await self.sequential_backend.add_message(session_id, message, project_id)
+        return await self.sequential_backend.add_message(phone, message, project_id)
 
-    # ============ API para memorias semánticas (BaseStore) ============
+    # ─────────────────────────────────────────────────────────────────────────
+    # Estado del agente (delega a sequential_backend)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def get_agent_state(self, phone: str) -> Optional[Dict[str, Any]]:
+        """Recupera el estado persistido del agente para una sesión."""
+        if not self._initialized:
+            await self.initialize()
+        return await self.sequential_backend.get_agent_state(phone)
+
+    async def save_agent_state(self, phone: str, state: Dict[str, Any]) -> None:
+        """Persiste el estado del agente."""
+        if not self._initialized:
+            await self.initialize()
+        return await self.sequential_backend.save_agent_state(phone, state)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Perfil de usuario (delega a sequential_backend)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def get_user_profile(self, phone: str) -> Optional[Dict[str, Any]]:
+        """Recupera el perfil del usuario."""
+        if not self._initialized:
+            await self.initialize()
+        return await self.sequential_backend.get_user_profile(phone)
+
+    async def upsert_user_profile(
+        self, phone: str, updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Crea o actualiza el perfil del usuario."""
+        if not self._initialized:
+            await self.initialize()
+        return await self.sequential_backend.upsert_user_profile(phone, updates)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Memorias semánticas (vector store)
+    # ─────────────────────────────────────────────────────────────────────────
 
     async def search_memories(
         self,
         user_id: str,
         query: str,
-        k: int = 5,
+        limit: int = 5,
         threshold: float = 0.7,
+        project_id: Optional[uuid.UUID] = None,
     ) -> List[Dict[str, Any]]:
         """
         Busca memorias semánticas relevantes para un usuario.
 
         Args:
-            user_id: ID del usuario (phone number)
-            query: Texto para buscar similitud
-            k: Número máximo de resultados
-            threshold: Umbral de similitud (0-1)
+            user_id:    Número de teléfono del usuario (phone).
+            query:      Texto de búsqueda por similitud.
+            limit:      Número máximo de resultados.
+            threshold:  Umbral de similitud mínima (0–1).
+            project_id: Ignorado por ahora (para compatibilidad futura).
 
         Returns:
-            Lista de diccionarios con {content, context, score, memory_id}
+            Lista de dicts con: key, content, context, score, memory_id
         """
         if not self._initialized:
             await self.initialize()
 
+        if self.store is None:
+            return []
+
         namespace = ("memories", user_id)
 
-        # Usar store.asearch para búsqueda semántica
-        # items: List[StoreItem] donde item.key, item.value, item.score
-        items = await self.store.asearch(
-            namespace,
-            query=query,
-            k=k,
-            # filter={}  # opcional
-        )
+        try:
+            items = await self.store.asearch(namespace, query=query, k=limit)
+        except Exception as e:
+            logger.warning("Error buscando memorias semánticas", user_id=user_id, error=str(e))
+            return []
 
-        # Filtrar por threshold y formatear resultados
         results = []
         for item in items:
-            if item.score >= threshold:
-                results.append({
-                    "content": item.value.get("content", ""),
-                    "context": item.value.get("context", ""),
-                    "score": float(item.score),
-                    "memory_id": item.key[2] if len(item.key) >= 3 else None,
-                })
+            score = float(getattr(item, "score", 0.0))
+            if score < threshold:
+                continue
+            memory_id = item.key[2] if len(item.key) >= 3 else str(item.key)
+            results.append({
+                "key": memory_id,           # compatible con agent._get_semantic_context
+                "content": item.value.get("content", ""),
+                "context": item.value.get("context", ""),
+                "score": score,
+                "memory_id": memory_id,
+            })
 
         return results
 
@@ -161,10 +214,10 @@ class MemoryAgentBackend:
         memory_id: Optional[str] = None,
     ) -> str:
         """
-        Guarda una memoria semántica para un usuario.
+        Guarda una memoria semántica para el usuario.
 
         Returns:
-            memory_id de la memoria guardada
+            memory_id de la memoria guardada/actualizada.
         """
         if not self._initialized:
             await self.initialize()
@@ -172,61 +225,27 @@ class MemoryAgentBackend:
         namespace = ("memories", user_id)
 
         if memory_id:
-            # Actualizar memoria existente
-            key = (*namespace, memory_id)
-            await self.store.ainput(
-                key,
-                {
-                    "content": content,
-                    "context": context,
-                    "user_id": user_id,
-                    "updated_at": uuid.uuid1().hex,  # timestamp简化
-                },
-            )
-            return memory_id
-        else:
-            # Crear nueva memoria
-            memory_id = str(uuid.uuid4())
-            key = (*namespace, memory_id)
             await self.store.aput(
-                key,
-                {
-                    "content": content,
-                    "context": context,
-                    "user_id": user_id,
-                    "created_at": uuid.uuid1().hex,
-                },
+                (*namespace, memory_id),
+                {"content": content, "context": context, "user_id": user_id},
             )
             return memory_id
+
+        new_id = str(uuid.uuid4())
+        await self.store.aput(
+            (*namespace, new_id),
+            {"content": content, "context": context, "user_id": user_id},
+        )
+        return new_id
 
     async def delete_memory(self, user_id: str, memory_id: str) -> bool:
-        """Elimina una memoria específica."""
+        """Elimina una memoria específica del usuario."""
         if not self._initialized:
             await self.initialize()
 
-        namespace = ("memories", user_id)
-        key = (*namespace, memory_id)
         try:
-            await self.store.adelete(key)
+            await self.store.adelete(("memories", user_id, memory_id))
             return True
         except Exception as e:
-            logger.error("Error eliminando memoria", error=str(e))
+            logger.error("Error eliminando memoria", user_id=user_id, error=str(e))
             return False
-
-    # ============ Estado de conversación ( State Machine ) ============
-
-    async def get_agent_state(self, phone: str) -> Optional[Dict[str, Any]]:
-        """Obtiene el estado guardado del agente (para StateMachine)."""
-        if not self._initialized:
-            await self.initialize()
-        # Usar sequential_backend.get_state si existe
-        if hasattr(self.sequential_backend, 'get_state'):
-            return await self.sequential_backend.get_state(phone)
-        return None
-
-    async def save_agent_state(self, phone: str, state: Dict[str, Any]) -> None:
-        """Guarda el estado del agente."""
-        if not self._initialized:
-            await self.initialize()
-        if hasattr(self.sequential_backend, 'save_state'):
-            await self.sequential_backend.save_state(phone, state)
