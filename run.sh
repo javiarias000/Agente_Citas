@@ -28,10 +28,8 @@ fi
 # Activar venv
 source venv/bin/activate
 
-# Cargar .env si existe
-if [ -f ".env" ]; then
-    export $(grep -v '^#' .env | grep '=' | xargs) 2>/dev/null || true
-fi
+# NOTA: Pydantic Settings carga automáticamente .env
+# No es necesario exportar variables manualmente
 
 # Ejecutar comando
 case "$command" in
@@ -42,7 +40,7 @@ case "$command" in
 
     dev)
         echo -e "${BLUE}🛠️  Iniciando en modo desarrollo con reload...${NC}"
-        uvicorn main:create_app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --reload
+        uvicorn main:create_app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --reload --env-file .env
         ;;
 
     test)

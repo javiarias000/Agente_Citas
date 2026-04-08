@@ -1,84 +1,63 @@
-# ===============================================
-# ARCADIUM AUTOMATION - DEPENDENCIAS
-# ===============================================
+# Dependencias principales del sistema Arcadium Automation
+# Core asincrónico y procesamiento de cadenas
 
-# === Framework Web (FastAPI) ===
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-
-# === HTTP Asíncrono ===
+# HTTP asíncrono
 aiohttp>=3.9.0
-httpx>=0.25.0
-requests>=2.31.0
 
-# === Validación y Configuración ===
+# Validación y configuración
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 jsonschema>=4.19.0
+
+# Utilidades
 python-dotenv>=1.0.0
-
-# === Base de Datos ===
-sqlalchemy>=2.0.0
-alembic>=1.13.0
-# Driver PostgreSQL para SQLAlchemy (legacy)
-psycopg2-binary>=2.9.9
-# Driver PostgreSQL para LangGraph Store (moderno, REQUERIDO si USE_MEMORY_AGENT=true con STORE_TYPE=postgres)
-psycopg>=3.0.0
-# Extensión PostgreSQL para vectores (opcional)
-pgvector>=0.2.0
-
-# === LangChain & AI ===
-langchain>=0.3.8
-langchain-core>=0.3.8
-langchain-openai>=0.2.1
-langchain-community>=0.0.10
-langchain-postgres>=0.0.9
-langchain-anthropic>=0.2.1
-
-# === LangGraph (incluye store: memory + postgres) ===
-langgraph>=1.0.0,<2.0.0
-langgraph-sdk>=0.1.32  # Opcional: para LangGraph Cloud
-
-# === Memoria Semántica (Memory-Agent Integration) ===
-# Nota: langgraph>=1.0.0 ya incluye langgraph.store.base, langgraph.store.memory
-# PostgreSQLStore se incluye en langgraph>=1.0.0
-
-# === Utilidades ===
-structlog>=24.1.0
 tenacity>=8.2.0
+structlog>=24.1.0
 psutil>=5.9.0
 watchdog>=3.0.0
+requests>=2.31.0
 websockets>=12.0
-packaging>=24.0  # Para comparación de versiones en scripts
 
-# === Monitoreo y Observabilidad ===
+# Persistencia (opcional)
+redis>=5.0.0
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+psycopg2-binary>=2.9.9
+
+# Monitoreo
 prometheus-client>=0.19.0
 opentelemetry-api>=1.20.0
 opentelemetry-sdk>=1.20.0
 
-# === Cache (opcional) ===
-redis>=5.0.0
+# LangChain & AI
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.10
+supabase>=2.3.0
+mcp>=0.9.0
 
-# === Google Calendar API ===
+# Web Framework (FastAPI)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# HTTP cliente para APIs externas
+httpx>=0.25.0
+
+# Base de datos PostgreSQL
+psycopg2-binary>=2.9.9
+pgvector>=0.2.0
+
+# LangChain moderno (sin deprecated)
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.10
+langchain-postgres>=0.0.9
+
+# Google Calendar API
 google-api-python-client>=2.0.0
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=0.4.1
 google-auth>=2.0.0
-
-# === Supabase (si se usa como alternativa) ===
-supabase>=2.3.0
-
-# === MCP (Model Context Protocol) ===
-mcp>=0.9.0
-
-
-# ===============================================
-# PAQUETES LOCALES (instalar con pip install -e)
-# ===============================================
-# memory-agent/ - Agente con memoria semántica vectorial
-#   Instrucción: pip install -e memory-agent/
-#
-# Verificar dependencias: python scripts/check_memory_agent_deps.py
 
 
