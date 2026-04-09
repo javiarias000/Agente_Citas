@@ -162,7 +162,9 @@ TRANSIENT_FIELDS: Set[str] = {
     "last_error",  # errores puntuales, no persistentes
     "confirmation_result",
     "datetime_adjusted",
-    "available_slots",  # slots del turno actual
+    # available_slots se persiste intencionalmente: el usuario necesita ver
+    # los slots en el Turn 2 para que detect_confirmation pueda extraer su elección.
+    # Se limpia en node_book_appointment y node_reschedule_appointment tras completar.
     "semantic_memory_context",  # contexto semántico (se regenera cada turno)
     "_tool_iterations",  # contador de iteraciones de tool-calling
 }

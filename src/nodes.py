@@ -196,7 +196,6 @@ async def node_entry(
             # No condicionarlo a si state["messages"] está vacío o no.
             history = await store.get_history(phone, limit=50)
             logger.info("node_entry: historial cargado", phone=phone, history_len=len(history))
-            logger.error("DEBUG HISTORY", history=history, phone=phone)
             updates["messages"] = list(history) + [new_message]
             # Registrar cuántos mensajes existían antes de este turno.
             # node_save_state usará este valor para guardar SOLO los mensajes nuevos.
@@ -218,6 +217,10 @@ async def node_entry(
                     "google_event_id",
                     "awaiting_confirmation",
                     "confirmation_type",
+                    # available_slots se persiste para que detect_confirmation
+                    # pueda extraer el slot elegido en el turno siguiente
+                    "available_slots",
+                    "selected_slot",
                 ]:
                     if f in prev_state and prev_state[f] is not None:
                         updates[f] = prev_state[f]
@@ -336,9 +339,18 @@ async def node_check_availability(
             else:
                 slots_iso.append(str(s))
 
+        if not slots_iso:
+            return {
+                "available_slots": [],
+                "last_error": "No hay slots disponibles para esa fecha. Intenta otra fecha.",
+            }
+
         return {
             "available_slots": slots_iso,
             "current_step": "awaiting_selection",
+            # Marcar que esperamos selección → el siguiente turno va a detect_confirmation
+            "awaiting_confirmation": True,
+            "confirmation_type": "book",
         }
     except Exception as e:
         return {
@@ -370,13 +382,13 @@ async def node_detect_confirmation(state: ArcadiumState) -> Dict[str, Any]:
 
 async def node_validate_and_confirm(state: ArcadiumState) -> Dict[str, Any]:
     """
-    Valida que el slot elegido esté en available_slots.
-    Si es válido, marca awaiting_confirmation.
+    Valida que hay un slot elegido. No requiere available_slots en estado
+    (puede estar vacío si llegamos desde un turno posterior donde los slots
+    ya se limpiaron; la validación real ocurrió en extract_slot_from_text).
     """
     selected = state.get("selected_slot")
-    available = state.get("available_slots", [])
 
-    if selected and selected in available:
+    if selected:
         return {
             "awaiting_confirmation": True,
             "confirmation_type": "book",
@@ -384,7 +396,7 @@ async def node_validate_and_confirm(state: ArcadiumState) -> Dict[str, Any]:
         }
 
     return {
-        "last_error": "Slot seleccionado no está disponible",
+        "last_error": "No se identificó el slot seleccionado. ¿Puede indicar la hora exacta?",
         "should_escalate": False,
     }
 
@@ -455,6 +467,10 @@ async def node_book_appointment(
             "google_event_link": event_link,
             "confirmation_sent": True,
             "current_step": "resolution",
+            # Limpiar estado de selección para no reutilizar en próximos turnos
+            "awaiting_confirmation": False,
+            "available_slots": [],
+            "confirmation_type": None,
         }
 
     except Exception as e:
@@ -620,6 +636,10 @@ async def node_reschedule_appointment(
             "google_event_link": new_event_link,
             "confirmation_sent": True,
             "current_step": "resolution",
+            # Limpiar estado de selección
+            "awaiting_confirmation": False,
+            "available_slots": [],
+            "confirmation_type": None,
         }
 
     except Exception as e:

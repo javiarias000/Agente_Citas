@@ -15,8 +15,29 @@ from src.state import get_missing_fields
 def edge_after_route_intent(state: Dict[str, Any]) -> str:
     """
     Después de route_intent, decide a dónde ir.
+
+    PRIORIDAD MÁXIMA: si estamos esperando selección/confirmación de un slot
+    (awaiting_confirmation=True), el mensaje del usuario debe ir a detect_confirmation
+    independientemente de su intent. Esto evita el bug donde el Turn 2 ("a las 10:00")
+    vuelve al inicio del flujo (check_missing → check_availability) en lugar de
+    procesar la selección del usuario y llamar a book_appointment.
+
+    Excepción: si el usuario cambia explícitamente de intención a cancelar/reagendar,
+    dejamos que el flujo de modificación tome precedencia.
     """
     intent = state.get("intent")
+    awaiting = state.get("awaiting_confirmation", False)
+    ctype = state.get("confirmation_type")
+
+    # Si esperamos selección de slot o confirmación para agendar,
+    # y el usuario no está cambiando a un flujo diferente (cancelar/reagendar)
+    if awaiting and ctype in ("book", None) and intent not in ("cancelar", "reagendar"):
+        return "detect_confirmation"
+
+    # Si esperamos confirmación de cancel o reschedule
+    if awaiting and ctype in ("cancel", "reschedule"):
+        return "detect_confirmation"
+
     if not intent:
         return "extract_intent"  # Fallback LLM
 
@@ -83,6 +104,10 @@ def edge_after_confirm(state: Dict[str, Any]) -> str:
         if ctype == "reschedule" and selected_slot:
             # Usuario eligió el nuevo slot para reagendar → ejecutar
             return "reschedule_appointment"
+        if ctype == "book" and selected_slot:
+            # Usuario eligió slot para agendar → crear cita directamente
+            # (slot ya fue validado por extract_slot_from_text, no necesita revalidar)
+            return "book_appointment"
         if selected_slot:
             return "validate_slot"
 

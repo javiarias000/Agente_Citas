@@ -131,6 +131,9 @@ def build_graph(
             "check_missing": "check_missing",
             "check_availability": "check_availability",
             "handle_modification": "prepare_modification",
+            # Ruta directa a detect_confirmation cuando awaiting_confirmation=True
+            # (ej: usuario está eligiendo un slot en el turno siguiente a ver disponibilidad)
+            "detect_confirmation": "detect_confirmation",
             "generate_response": "generate_response",
         },
     )
