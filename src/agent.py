@@ -20,6 +20,7 @@ import contextvars
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from langchain_core.messages import HumanMessage, AIMessage
 
 import structlog
 
@@ -114,11 +115,9 @@ class ArcadiumAgent:
             project_id=self.project_id,
         )
 
-        # FIX: pasar el mensaje nuevo via _incoming_message, NO via messages.
-        # node_entry construirá: historial_del_store + [HumanMessage(incoming)]
         state["_incoming_message"] = message
-        state["conversation_turns"] = 0  # node_entry lo incrementa
-
+        state["conversation_turns"] = 0
+        
         # Restaurar campos persistentes del estado previo (NO mensajes)
         try:
             prev_state = await self.store.get_agent_state(phone)
@@ -164,7 +163,11 @@ class ArcadiumAgent:
         # Invocar grafo
         config = {"configurable": {"thread_id": self.session_id}}
         try:
-            result = await self.graph.ainvoke(input=state, config=config)
+            result = await self.graph.ainvoke(
+                state,
+                config=config
+            )
+            
         except Exception as e:
             logger.error("Error invocando grafo", error=str(e), exc_info=True)
             return AgentResponse(

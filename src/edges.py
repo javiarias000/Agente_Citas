@@ -57,6 +57,9 @@ def edge_after_check_missing(state: Dict[str, Any]) -> str:
 def edge_after_confirm(state: Dict[str, Any]) -> str:
     """
     Después de detect_confirmation.
+
+    Para reagendar: si el usuario eligió slot nuevo → ejecutar reagendamiento.
+    Para cancelar: si el usuario confirmó → ejecutar cancelación.
     """
     result = state.get("confirmation_result", "unknown")
     ctype = state.get("confirmation_type")
@@ -68,12 +71,20 @@ def edge_after_confirm(state: Dict[str, Any]) -> str:
         if ctype == "cancel":
             return "cancel_appointment"
         if ctype == "reschedule":
+            # El usuario confirmó reagendar; si ya tiene slot → ejecutar.
+            # Si no tiene slot, pedir nueva fecha en generate_response.
+            if selected_slot:
+                return "reschedule_appointment"
             return "generate_response"
-        # Confirmación genérica → intentar agendar
+        # Confirmación genérica (sin ctype) → intentar agendar
         return "book_appointment"
 
-    if result == "slot_choice" and selected_slot:
-        return "validate_slot"
+    if result == "slot_choice":
+        if ctype == "reschedule" and selected_slot:
+            # Usuario eligió el nuevo slot para reagendar → ejecutar
+            return "reschedule_appointment"
+        if selected_slot:
+            return "validate_slot"
 
     if result == "no":
         return "generate_response"  # "¿Qué fecha prefiere?"

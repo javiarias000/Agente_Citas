@@ -220,6 +220,9 @@ class ArcadiumState(TypedDict, total=False):
     google_event_link: Optional[str]
     confirmation_sent: bool
 
+    # --- Contexto semántico (inyectado por agent.py, descartado en save) ---
+    semantic_memory_context: Optional[str]
+
     # --- Control ---
     missing_fields: List[str]
     last_error: Optional[str]

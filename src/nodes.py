@@ -196,6 +196,7 @@ async def node_entry(
             # No condicionarlo a si state["messages"] está vacío o no.
             history = await store.get_history(phone, limit=50)
             logger.info("node_entry: historial cargado", phone=phone, history_len=len(history))
+            logger.error("DEBUG HISTORY", history=history, phone=phone)
             updates["messages"] = list(history) + [new_message]
             # Registrar cuántos mensajes existían antes de este turno.
             # node_save_state usará este valor para guardar SOLO los mensajes nuevos.
@@ -223,10 +224,15 @@ async def node_entry(
 
         except Exception as e:
             logger.warning("no se pudo cargar estado previo", error=str(e))
-            # Fallback seguro: al menos incluir el mensaje nuevo
+            # Fallback seguro: al menos incluir el mensaje nuevo.
+            # IMPORTANTE: resetear _history_len a 0 porque messages se sobreescribe
+            # sin historial. Si _history_len quedara con un valor previo (del try block
+            # parcialmente ejecutado), node_save_state calcularía new_messages[N:] vacío.
             updates["messages"] = [new_message]
+            updates["_history_len"] = 0
     else:
         updates["messages"] = [new_message]
+        updates["_history_len"] = 0
 
     # Escalación por número de turns
     if updates["conversation_turns"] >= 10:
@@ -291,6 +297,8 @@ async def node_check_availability(
 ) -> Dict[str, Any]:
     """
     Consulta slots disponibles vía Google Calendar.
+    Convierte los dicts de slot a ISO strings para que sean serializables
+    y compatibles con extract_slot_from_text.
     Sin LLM.
     """
     dt_iso = state.get("datetime_preference")
@@ -316,8 +324,20 @@ async def node_check_availability(
             duration_minutes=duration,
         )
 
+        # Normalizar a ISO strings para facilitar comparación y serialización
+        slots_iso = []
+        for s in slots:
+            if isinstance(s, dict):
+                start = s.get("start")
+                if isinstance(start, datetime):
+                    slots_iso.append(start.isoformat())
+                else:
+                    slots_iso.append(str(start))
+            else:
+                slots_iso.append(str(s))
+
         return {
-            "available_slots": slots,
+            "available_slots": slots_iso,
             "current_step": "awaiting_selection",
         }
     except Exception as e:
@@ -395,12 +415,14 @@ async def node_book_appointment(
         event_id = None
         event_link = None
         if calendar_service:
-            event_id, event_link = await calendar_service.create_event(
-                start=dt,
-                end=end_dt,
+            event = await calendar_service.create_event(
                 title=f"{service} - {patient}",
+                start_time=dt,
+                end_time=end_dt,
                 description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
             )
+            event_id = event.get("id")
+            event_link = event.get("htmlLink")
 
         # Crear en DB
         appt_id = None
@@ -473,11 +495,137 @@ async def node_cancel_appointment(
         return {
             "current_step": "resolution",
             "confirmation_sent": True,
+            # Limpiar IDs para que el LLM no confunda con una reserva activa
+            "appointment_id": None,
+            "google_event_id": None,
+            "google_event_link": None,
         }
 
     except Exception as e:
         return {
             "last_error": f"Error cancelando cita: {e}",
+        }
+
+
+async def node_prepare_modification(state: ArcadiumState) -> Dict[str, Any]:
+    """
+    Nodo determinista que prepara el estado para flujos de cancelación/reagendamiento.
+    Se ejecuta ANTES de detect_confirmation para setear confirmation_type
+    basado en el intent ya detectado.
+
+    Sin esto, edge_after_confirm recibe ctype=None y enruta a book_appointment
+    en lugar de cancel_appointment.
+    """
+    intent = state.get("intent")
+    if intent == "cancelar":
+        return {
+            "awaiting_confirmation": True,
+            "confirmation_type": "cancel",
+            "current_step": "awaiting_cancel_confirmation",
+        }
+    elif intent == "reagendar":
+        return {
+            "awaiting_confirmation": True,
+            "confirmation_type": "reschedule",
+            "current_step": "awaiting_reschedule_details",
+        }
+    return {}
+
+
+async def node_reschedule_appointment(
+    state: ArcadiumState,
+    *,
+    calendar_service=None,
+    db_service=None,
+) -> Dict[str, Any]:
+    """
+    Reagenda una cita: cancela el evento anterior y crea uno nuevo.
+    DETERMINISTA — cero llamadas al LLM.
+    """
+    new_slot = state.get("selected_slot") or state.get("datetime_preference")
+    if not new_slot:
+        return {"last_error": "No hay nuevo slot para reagendar"}
+
+    old_event_id = state.get("google_event_id")
+    old_appt_id = state.get("appointment_id")
+
+    try:
+        # 1. Cancelar evento anterior en Google Calendar
+        if calendar_service and old_event_id:
+            try:
+                await calendar_service.delete_event(old_event_id)
+                logger.info("Evento anterior eliminado", event_id=old_event_id)
+            except Exception as e:
+                logger.warning("Error cancelando evento anterior en Calendar", error=str(e))
+
+        # 2. Cancelar cita anterior en DB
+        if db_service and old_appt_id:
+            try:
+                import uuid as _uuid
+                await db_service.cancel_appointment(
+                    session=None,
+                    appointment_id=_uuid.UUID(old_appt_id),
+                )
+            except Exception as e:
+                logger.warning("Error cancelando cita anterior en DB", error=str(e))
+
+        # 3. Crear nuevo evento en Google Calendar
+        dt = datetime.fromisoformat(new_slot)
+        duration = state.get("service_duration", 30)
+        end_dt = dt + timedelta(minutes=duration)
+        patient = state.get("patient_name", "Paciente")
+        service = state.get("selected_service", "consulta")
+
+        new_event_id = None
+        new_event_link = None
+        if calendar_service:
+            event = await calendar_service.create_event(
+                title=f"{service} - {patient}",
+                start_time=dt,
+                end_time=end_dt,
+                description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
+            )
+            new_event_id = event.get("id")
+            new_event_link = event.get("htmlLink")
+
+        # 4. Crear nueva cita en DB
+        new_appt_id = None
+        if db_service:
+            try:
+                _, __, appt = await db_service.create_appointment(
+                    session=None,
+                    phone_number=state.get("phone_number", ""),
+                    appointment_datetime=dt,
+                    service_type=service,
+                    project_id=state.get("project_id"),
+                    metadata={"google_event_id": new_event_id, "patient_name": patient},
+                )
+                if appt:
+                    new_appt_id = str(appt.id)
+            except Exception as e:
+                logger.warning("Error creando nueva cita en DB", error=str(e))
+
+        logger.info(
+            "Cita reagendada",
+            patient=patient,
+            service=service,
+            new_slot=new_slot,
+            old_event_id=old_event_id,
+            new_event_id=new_event_id,
+        )
+
+        return {
+            "appointment_id": new_appt_id or "pending_db",
+            "google_event_id": new_event_id,
+            "google_event_link": new_event_link,
+            "confirmation_sent": True,
+            "current_step": "resolution",
+        }
+
+    except Exception as e:
+        return {
+            "last_error": f"Error reagendando cita: {e}",
+            "should_escalate": True,
         }
 
 
@@ -503,11 +651,15 @@ async def node_save_state(
 
         await store.save_agent_state(phone, filter_persistent_state(state))
 
-        # Persistir SOLO los mensajes nuevos del turno actual.
-        # _history_len indica cuántos mensajes existían en el store ANTES de este turno
-        # (registrado por node_entry). Todo lo que está en índices >= _history_len
-        # es nuevo: el HumanMessage entrante + la respuesta AI + tool messages.
-        # Esto evita re-guardar el historial completo en cada turno (bug de duplicados).
+        # Persistir SOLO el último HumanMessage y el último AIMessage limpio del turno.
+        #
+        # ¿Por qué no guardar todos los mensajes nuevos?
+        # El flujo tool-calling produce: [HumanMessage, AIMessage(tool_calls=[...]),
+        # ToolMessage, AIMessage(content="respuesta final")].
+        # Si guardamos el AIMessage con tool_calls sin su ToolMessage correspondiente,
+        # la próxima llamada a OpenAI falla: "assistant message with tool_calls must be
+        # followed by tool messages". Guardando solo el par limpio (Human+AI_final)
+        # la historia siempre es válida para la API.
         messages = state.get("messages", [])
         history_len = state.get("_history_len", 0)
         new_messages = messages[history_len:]
@@ -515,22 +667,34 @@ async def node_save_state(
         from langchain_core.messages import AIMessage
         from langchain_core.messages import HumanMessage as HM
 
+        # Encontrar el último HumanMessage y el último AIMessage sin tool_calls
+        last_human = None
+        last_ai = None
+        for msg in reversed(new_messages):
+            if last_ai is None and isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
+                last_ai = msg
+            if last_human is None and isinstance(msg, HM):
+                last_human = msg
+            if last_human is not None and last_ai is not None:
+                break
+
+        to_save = [m for m in [last_human, last_ai] if m is not None]
         saved_count = 0
-        for msg in new_messages:
-            if isinstance(msg, (HM, AIMessage)):
-                try:
-                    await store.add_message(
-                        phone, msg, project_id=state.get("project_id")
-                    )
-                    saved_count += 1
-                except Exception as e:
-                    logger.warning("Error guardando mensaje", error=str(e))
+        for msg in to_save:
+            try:
+                await store.add_message(
+                    phone, msg, project_id=state.get("project_id")
+                )
+                saved_count += 1
+            except Exception as e:
+                logger.warning("Error guardando mensaje", error=str(e))
         logger.info(
             "node_save_state: mensajes guardados",
             phone=phone,
             count=saved_count,
             history_len=history_len,
             total_messages=len(messages),
+            new_messages_in_turn=len(new_messages),
         )
 
         # Actualizar perfil del usuario
@@ -682,10 +846,12 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
         "selected_slot": state.get("selected_slot"),
         "confirmation_result": state.get("confirmation_result"),
         "confirmation_type": state.get("confirmation_type"),
+        "awaiting_confirmation": state.get("awaiting_confirmation", False),
         "appointment_id": state.get("appointment_id"),
         "google_event_link": state.get("google_event_link"),
         "selected_service": state.get("selected_service"),
         "datetime_preference": state.get("datetime_preference"),
+        "confirmation_sent": state.get("confirmation_sent", False),
         "last_error": state.get("last_error"),
         "conversation_turns": state.get("conversation_turns", 0),
         "semantic_memory_context": state.get("semantic_memory_context", ""),
@@ -696,33 +862,55 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
 # NODO GENERATE_RESPONSE CON TOOL-CALLING
 # ═══════════════════════════════════════════════════════════
 
+from datetime import datetime
+from typing import Dict, Any
+
+
+def _format_slots(slots):
+    """
+    Convierte slots (ISO strings o dicts) a formato legible para WhatsApp (HH:MM).
+    """
+    formatted = []
+
+    for slot in slots:
+        if isinstance(slot, dict):
+            start = slot.get("start")
+        else:
+            start = slot  # ISO string
+
+        if isinstance(start, str):
+            try:
+                dt = datetime.fromisoformat(start)
+            except ValueError:
+                formatted.append(start)
+                continue
+        elif isinstance(start, datetime):
+            dt = start
+        else:
+            continue
+
+        formatted.append(dt.strftime("%H:%M"))
+
+    return ", ".join(formatted)
+
+
 async def node_generate_response_with_tools(
-    state: ArcadiumState,
+    state: Dict[str, Any],
     *,
     llm=None,
     vector_store=None,
 ) -> Dict[str, Any]:
-    """
-    Genera la respuesta final de Deyy con soporte para tool-calling.
 
-    Si vector_store está disponible, bindea la herramienta upsert_memory_arcadium.
-    Flujo:
-    1. Construye prompt con contexto.
-    2. Invoca LLM con bind_tools.
-    3. Devuelve mensaje AI (puede contener tool_calls).
-
-    El routing condicional decidirá si ejecutar herramientas o guardar estado.
-    """
     if not llm:
-        fallback = "Lo siento, hubo un error. Por favor intente nuevamente o llame a la clínica. 📞"
         from langchain_core.messages import AIMessage
 
+        fallback = "Lo siento, hubo un error. Por favor intente nuevamente o llame a la clínica. 📞"
         return {"messages": [AIMessage(content=fallback)]}
 
-    # Incrementar contador de iteraciones
+    # ✅ contador de iteraciones
     iterations = state.get("_tool_iterations", 0) + 1
 
-    # Construir contexto para system prompt
+    # ✅ contexto
     context_dict = _build_llm_context(state)
     context_parts = []
 
@@ -748,6 +936,7 @@ async def node_generate_response_with_tools(
     if datetime_pref:
         context_parts.append(f"Fecha/hora preferida: {datetime_pref}")
 
+    # ✅ slots disponibles
     slots = context_dict.get("available_slots", [])
     if slots:
         readable = _format_slots(slots[:4])
@@ -757,17 +946,57 @@ async def node_generate_response_with_tools(
     if selected_slot:
         context_parts.append(f"Usuario eligió slot: {selected_slot}")
 
+    ctype = context_dict.get("confirmation_type")
+    confirmation_sent = context_dict.get("confirmation_sent", False)
     appt_id = context_dict.get("appointment_id")
-    if appt_id:
+
+    if confirmation_sent and ctype == "cancel":
+        # Cancelación ejecutada exitosamente
+        svc = context_dict.get("selected_service", "la cita")
+        context_parts.append(
+            f"La cita de {svc} ha sido cancelada exitosamente. Confirma al usuario con formato: "
+            f'"Su cita de {{servicio}} ha sido cancelada exitosamente."'
+        )
+    elif confirmation_sent and ctype == "reschedule" and appt_id:
+        # Reagendamiento ejecutado exitosamente
         svc = context_dict.get("selected_service", "")
         slot = context_dict.get("selected_slot") or context_dict.get("datetime_preference", "")
         context_parts.append(
-            f"Cita agendada exitosamente: {svc} el {slot}. Confirma al usuario."
+            f"La cita de {svc} ha sido reagendada para {slot}. Confirma con formato: "
+            f'"Su cita de {{servicio}} ha sido reagendada para el {{día}} a las {{hora}}."'
+        )
+    elif appt_id and (not ctype or ctype == "book"):
+        # Booking nuevo ejecutado exitosamente
+        svc = context_dict.get("selected_service", "")
+        slot = context_dict.get("selected_slot") or context_dict.get("datetime_preference", "")
+        context_parts.append(
+            f"Cita agendada exitosamente: {svc} el {slot}. Confirma con formato: "
+            f'"Su cita de {{servicio}} ha sido agendada para el {{día}} a las {{hora}}."'
+        )
+    elif ctype == "cancel" and not confirmation_sent:
+        # Esperando confirmación de cancelación
+        svc = context_dict.get("selected_service", "la cita")
+        context_parts.append(
+            f"El usuario quiere CANCELAR su cita de {svc}. "
+            "Pide confirmación explícita: '¿Confirma que desea cancelar su cita de {servicio}?'"
+        )
+    elif ctype == "reschedule" and not confirmation_sent:
+        # Esperando nueva fecha para reagendar
+        svc = context_dict.get("selected_service", "la cita")
+        context_parts.append(
+            f"El usuario quiere REAGENDAR su cita de {svc}. "
+            "Pregunta por la nueva fecha y hora preferida."
         )
 
     error = context_dict.get("last_error")
     if error:
         context_parts.append(f"Error ocurrido: {error}. Sugiere llamar a la clínica.")
+        # Si no hay appointment_id ni calendar credentials, guiar a la clínica
+        if not appt_id and not context_dict.get("google_event_id"):
+            context_parts.append(
+                "No se encontró una cita activa para este usuario. "
+                "Sugiere llamar directamente a la clínica para gestionar la cita."
+            )
 
     turns = context_dict.get("conversation_turns", 0)
     if turns >= 8:
@@ -785,13 +1014,13 @@ async def node_generate_response_with_tools(
 
     system_prompt = _GENERATE_RESPONSE_SYSTEM_WITH_TOOLS.format(context=context_str)
 
-    # Preparar mensajes para el LLM: system + historial
-    history = state.get("messages", [])
+    # ✅ mensajes LLM
     from langchain_core.messages import SystemMessage
 
+    history = state.get("messages", [])
     lm_messages = [SystemMessage(content=system_prompt)] + list(history)
 
-    # Bindear herramienta si hay vector_store y phone_number
+    # ✅ tool binding
     bound_tool = None
     if vector_store:
         user_id = state.get("phone_number", "")
@@ -805,7 +1034,6 @@ async def node_generate_response_with_tools(
             llm_with_tools = llm.bind_tools([bound_tool])
             response = await llm_with_tools.ainvoke(lm_messages)
         else:
-            # Sin herramienta: generar respuesta simple (fallback)
             response = await llm.ainvoke(lm_messages)
 
         return {
@@ -815,10 +1043,13 @@ async def node_generate_response_with_tools(
 
     except Exception as e:
         logger.error("Error en node_generate_response_with_tools", error=str(e))
+
         from langchain_core.messages import AIMessage
 
         return {
-            "messages": [AIMessage(content=f"Lo siento, hubo un error generando la respuesta.")],
+            "messages": [
+                AIMessage(content="Lo siento, hubo un error generando la respuesta.")
+            ],
             "_tool_iterations": iterations,
             "last_error": str(e),
             "should_escalate": True,

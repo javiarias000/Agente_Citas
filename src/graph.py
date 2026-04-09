@@ -7,7 +7,7 @@ Conecta todos los nodos, edges, y dependencias en un StateGraph compilado.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Dict
+from typing import Any
 
 import structlog
 from langgraph.graph import END, START, StateGraph
@@ -32,35 +32,35 @@ def build_graph(
         db_service: AppointmentService
         vector_store: BaseStore vectorial para memorias semánticas (MemoryAgentIntegration.store)
     """
-    from src.state import ArcadiumState
-
-    # Importar nodos y edges
-    from src.nodes import (
-        node_entry,
-        node_route_intent,
-        node_extract_intent,
-        node_check_missing,
-        node_extract_data,
-        node_adjust_weekend,
-        node_check_availability,
-        node_detect_confirmation,
-        node_validate_and_confirm,
-        node_book_appointment,
-        node_cancel_appointment,
-        node_generate_response_with_tools,
-        node_execute_memory_tools,
-        node_save_state,
-        edge_after_generate_response,
-    )
     from src.edges import (
-        edge_after_route_intent,
+        edge_after_adjust_weekend,
         edge_after_check_missing,
         edge_after_confirm,
         edge_after_extract_data,
-        edge_after_adjust_weekend,
-        edge_after_validate,
-        edge_should_escalate,
+        edge_after_route_intent,
     )
+
+    # Importar nodos y edges
+    from src.nodes import (
+        edge_after_generate_response,
+        node_adjust_weekend,
+        node_book_appointment,
+        node_cancel_appointment,
+        node_check_availability,
+        node_check_missing,
+        node_detect_confirmation,
+        node_entry,
+        node_execute_memory_tools,
+        node_extract_data,
+        node_extract_intent,
+        node_generate_response_with_tools,
+        node_prepare_modification,
+        node_reschedule_appointment,
+        node_route_intent,
+        node_save_state,
+        node_validate_and_confirm,
+    )
+    from src.state import ArcadiumState
 
     # ── Crear graph ──────────────────────────────────────────
     graph = StateGraph(ArcadiumState)
@@ -87,7 +87,20 @@ def build_graph(
     )
     graph.add_node(
         "cancel_appointment",
-        partial(node_cancel_appointment, db_service=db_service),
+        partial(
+            node_cancel_appointment,
+            calendar_service=calendar_service,
+            db_service=db_service,
+        ),
+    )
+    graph.add_node("prepare_modification", node_prepare_modification)
+    graph.add_node(
+        "reschedule_appointment",
+        partial(
+            node_reschedule_appointment,
+            calendar_service=calendar_service,
+            db_service=db_service,
+        ),
     )
     graph.add_node("save_state", partial(node_save_state, store=store))
 
@@ -117,10 +130,13 @@ def build_graph(
             "extract_intent": "extract_intent",
             "check_missing": "check_missing",
             "check_availability": "check_availability",
-            "handle_modification": "detect_confirmation",
+            "handle_modification": "prepare_modification",
             "generate_response": "generate_response",
         },
     )
+
+    # prepare_modification → detect_confirmation (siempre)
+    graph.add_edge("prepare_modification", "detect_confirmation")
 
     # extract_intent → check_missing (ya se determinó el intent, ahora verificar datos)
     graph.add_edge("extract_intent", "check_missing")
@@ -194,6 +210,9 @@ def build_graph(
     # cancel_appointment → generate_response (confirmación de cancelación)
     graph.add_edge("cancel_appointment", "generate_response")
 
+    # reschedule_appointment → generate_response (confirmación de reagendamiento)
+    graph.add_edge("reschedule_appointment", "generate_response")
+
     # ── Escalation check (opcional) ──────────────────────────
     # No se agrega como conditional edge en el graph principal
     # porque el grafo siempre termina en save_state → END.
@@ -215,10 +234,8 @@ def compile_graph(
 ):
     """
     Construye y compila el grafo con checkpointer.
-
-    Returns:
-        CompiledGraph listo para invoke/ainvoke.
     """
+
     graph = build_graph(
         llm=llm,
         store=store,
@@ -233,4 +250,5 @@ def compile_graph(
         compiled = graph.compile()
 
     logger.info("Graph de Arcadium compilado")
+
     return compiled
