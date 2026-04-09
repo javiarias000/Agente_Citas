@@ -185,7 +185,7 @@ class MemoryAgentBackend:
         namespace = ("memories", user_id)
 
         try:
-            items = await self.store.asearch(namespace, query=query, k=limit)
+            items = await self.store.asearch(namespace, query=query, limit=limit)
         except Exception as e:
             logger.warning("Error buscando memorias semánticas", user_id=user_id, error=str(e))
             return []

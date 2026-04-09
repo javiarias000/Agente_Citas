@@ -30,8 +30,17 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
     ctype = state.get("confirmation_type")
 
     # Si esperamos selección de slot o confirmación para agendar,
-    # y el usuario no está cambiando a un flujo diferente (cancelar/reagendar)
+    # y el usuario no está cambiando a un flujo diferente (cancelar/reagendar).
+    # Excepción: si hay available_slots ya ofrecidos, el usuario probablemente
+    # está confirmando/eligiendo un slot (ej: dijo "Si" y el LLM clasifica
+    # "reagendar" por contexto). En ese caso, priorizar detect_confirmation.
     if awaiting and ctype in ("book", None) and intent not in ("cancelar", "reagendar"):
+        return "detect_confirmation"
+
+    # Si hay slots disponibles y el usuario está esperando confirmar/elegir,
+    # enrutar a detect_confirmation aunque el LLM haya devuelto "reagendar".
+    # Esto evita que "Si" (confirmación) reinicie el flujo de modificación.
+    if awaiting and state.get("available_slots") and intent == "reagendar":
         return "detect_confirmation"
 
     # Si esperamos confirmación de cancel o reschedule

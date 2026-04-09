@@ -135,9 +135,7 @@ class ArcadiumAPI:
         try:
             self._calendar_service = GoogleCalendarService(
                 calendar_id=self.settings.GOOGLE_CALENDAR_DEFAULT_ID,
-                credentials_path=self.settings.GOOGLE_CALENDAR_CREDENTIALS_PATH,
                 timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
-                redirect_uri=self.settings.GOOGLE_REDIRECT_URI,
             )
             logger.info("Calendar service inicializado correctamente")
         except Exception as e:
@@ -221,6 +219,7 @@ class ArcadiumAPI:
             from memory_agent_integration.memory_agent_backend import MemoryAgentBackend
             from src.graph import compile_graph
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver as PostgresSaver
+            from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 
             # 1. Backend unificado: historial secuencial + vector store semántico.
@@ -259,7 +258,10 @@ class ArcadiumAPI:
                     pg_url += "?sslmode=require"
 
             # abrir conexión correctamente
-            self.checkpointer_ctx = PostgresSaver.from_conn_string(pg_url)
+            _serde = JsonPlusSerializer(
+                allowed_msgpack_modules=[("asyncpg.pgproto.pgproto", "UUID")]
+            )
+            self.checkpointer_ctx = PostgresSaver.from_conn_string(pg_url, serde=_serde)
             self.checkpointer = await self.checkpointer_ctx.__aenter__()
 
             logger.info(
@@ -438,42 +440,18 @@ class ArcadiumAPI:
 
         @app.get("/auth/google")
         async def auth_google():
-            try:
-                from services.google_calendar_service import GoogleCalendarService
-
-                if not self.settings.GOOGLE_REDIRECT_URI:
-                    return JSONResponse(
-                        {"error": "GOOGLE_REDIRECT_URI no configurado"}, status_code=500
-                    )
-                gcal = GoogleCalendarService(
-                    calendar_id=self.settings.GOOGLE_CALENDAR_DEFAULT_ID,
-                    credentials_path=self.settings.GOOGLE_CALENDAR_CREDENTIALS_PATH,
-                    timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
-                    redirect_uri=self.settings.GOOGLE_REDIRECT_URI,
-                )
-                return RedirectResponse(url=gcal.get_authorization_url())
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
+            return JSONResponse(
+                {
+                    "info": "La autenticación usa refresh token desde variables de entorno.",
+                    "required_env_vars": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
+                }
+            )
 
         @app.get("/oauth2callback")
-        async def oauth2callback(code: str):
-            try:
-                from services.google_calendar_service import GoogleCalendarService
-
-                gcal = GoogleCalendarService(
-                    calendar_id=self.settings.GOOGLE_CALENDAR_DEFAULT_ID,
-                    credentials_path=self.settings.GOOGLE_CALENDAR_CREDENTIALS_PATH,
-                    timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
-                    redirect_uri=self.settings.GOOGLE_REDIRECT_URI,
-                )
-                gcal.exchange_code_for_tokens(code)
-                return RedirectResponse(url="/")
-            except Exception as e:
-                logger.error("Error en oauth2callback", error=str(e), exc_info=True)
-                return HTMLResponse(
-                    content=f"<h1>Error de Autorización</h1><p>{str(e)}</p><a href='/'>Volver</a>",
-                    status_code=500,
-                )
+        async def oauth2callback(code: str = None):
+            return JSONResponse(
+                {"info": "Este callback ya no se usa. La autenticación es via refresh token en .env."}
+            )
 
         # ── Endpoints de información ──────────────────
 
@@ -515,17 +493,18 @@ class ArcadiumAPI:
         @app.get("/api/calendar/status")
         async def calendar_status():
             try:
-                from services.google_calendar_service import (
-                    get_default_calendar_service,
-                )
+                from services.google_calendar_service import get_default_calendar_service
+                import os
 
                 gcal = get_default_calendar_service()
-                token_exists = os.path.exists(
-                    os.path.join(os.path.dirname(gcal.credentials_path), "token.json")
-                )
+                connected = all([
+                    os.getenv("GOOGLE_REFRESH_TOKEN"),
+                    os.getenv("GOOGLE_CLIENT_ID"),
+                    os.getenv("GOOGLE_CLIENT_SECRET"),
+                ])
                 return {
                     "enabled": self.settings.GOOGLE_CALENDAR_ENABLED,
-                    "connected": token_exists,
+                    "connected": connected,
                     "calendar_id": gcal.calendar_id,
                 }
             except Exception as e:
