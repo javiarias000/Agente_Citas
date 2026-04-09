@@ -523,6 +523,102 @@ async def node_cancel_appointment(
         }
 
 
+async def node_lookup_appointment(
+    state: ArcadiumState,
+    *,
+    calendar_service=None,
+) -> Dict[str, Any]:
+    """
+    Busca la cita real del cliente en Google Calendar.
+    DETERMINISTA — cero LLM.
+
+    Siempre consulta Google Calendar (no confía en memoria/estado).
+    Busca en los próximos 60 días eventos cuya descripción contenga el número de teléfono.
+    Actualiza el estado con el evento encontrado (google_event_id, datetime_preference, etc.)
+    """
+    if not calendar_service:
+        logger.warning("node_lookup_appointment: sin calendar_service, saltando")
+        return {}
+
+    phone = state.get("phone_number", "")
+    if not phone:
+        logger.warning("node_lookup_appointment: sin phone_number")
+        return {}
+
+    try:
+        from datetime import date
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("America/Guayaquil")
+        now = datetime.now(tz)
+        future = now + timedelta(days=60)
+
+        events = await calendar_service.list_events(
+            start_date=now,
+            end_date=future,
+            max_results=50,
+        )
+
+        # Buscar eventos que contengan el teléfono del cliente en la descripción
+        found = None
+        for event in events:
+            desc = event.get("description", "") or ""
+            summary = event.get("summary", "") or ""
+            if phone in desc or phone.lstrip("+") in desc:
+                found = event
+                break
+
+        if not found:
+            logger.info(
+                "node_lookup_appointment: no se encontró cita para el cliente",
+                phone=phone,
+                events_checked=len(events),
+            )
+            # Limpiar estado de cita anterior para que el LLM no use datos viejos
+            return {
+                "google_event_id": None,
+                "google_event_link": None,
+                "appointment_id": None,
+                "datetime_preference": None,
+                "calendar_lookup_done": True,
+                "calendar_appointment_found": False,
+            }
+
+        # Extraer datos del evento encontrado
+        event_id = found.get("id")
+        event_link = found.get("htmlLink")
+        start_str = found.get("start", {}).get("dateTime") or found.get("start", {}).get("date")
+        summary = found.get("summary", "")
+
+        # Parsear datetime del evento
+        dt_str = None
+        if start_str:
+            dt_str = start_str.split("+")[0].split("Z")[0]  # quitar timezone suffix
+
+        logger.info(
+            "node_lookup_appointment: cita encontrada en Calendar",
+            phone=phone,
+            event_id=event_id,
+            start=dt_str,
+            summary=summary,
+        )
+
+        return {
+            "google_event_id": event_id,
+            "google_event_link": event_link,
+            "datetime_preference": dt_str,
+            "calendar_lookup_done": True,
+            "calendar_appointment_found": True,
+        }
+
+    except Exception as e:
+        logger.error("node_lookup_appointment: error consultando Calendar", error=str(e))
+        return {
+            "calendar_lookup_done": True,
+            "calendar_appointment_found": False,
+        }
+
+
 async def node_prepare_modification(state: ArcadiumState) -> Dict[str, Any]:
     """
     Nodo determinista que prepara el estado para flujos de cancelación/reagendamiento.
@@ -996,17 +1092,39 @@ async def node_generate_response_with_tools(
     elif ctype == "cancel" and not confirmation_sent:
         # Esperando confirmación de cancelación
         svc = context_dict.get("selected_service", "la cita")
-        context_parts.append(
-            f"El usuario quiere CANCELAR su cita de {svc}. "
-            "Pide confirmación explícita: '¿Confirma que desea cancelar su cita de {servicio}?'"
-        )
+        lookup_done = context_dict.get("calendar_lookup_done", False)
+        found = context_dict.get("calendar_appointment_found", False)
+        if lookup_done and not found:
+            context_parts.append(
+                "IMPORTANTE: Se consultó Google Calendar y NO se encontró ninguna cita activa "
+                "para este número de teléfono. Informa al usuario que no tienes citas agendadas "
+                "a su nombre y ofrece agendar una nueva si lo desea."
+            )
+        else:
+            dt = context_dict.get("datetime_preference", "")
+            dt_info = f" del {dt}" if dt else ""
+            context_parts.append(
+                f"El usuario quiere CANCELAR su cita de {svc}{dt_info}. "
+                "Pide confirmación explícita: '¿Confirma que desea cancelar su cita de {servicio}?'"
+            )
     elif ctype == "reschedule" and not confirmation_sent:
         # Esperando nueva fecha para reagendar
         svc = context_dict.get("selected_service", "la cita")
-        context_parts.append(
-            f"El usuario quiere REAGENDAR su cita de {svc}. "
-            "Pregunta por la nueva fecha y hora preferida."
-        )
+        lookup_done = context_dict.get("calendar_lookup_done", False)
+        found = context_dict.get("calendar_appointment_found", False)
+        if lookup_done and not found:
+            context_parts.append(
+                "IMPORTANTE: Se consultó Google Calendar y NO se encontró ninguna cita activa "
+                "para este número de teléfono. Informa al usuario que no tienes citas agendadas "
+                "a su nombre y ofrece agendar una nueva si lo desea."
+            )
+        else:
+            dt = context_dict.get("datetime_preference", "")
+            dt_info = f" del {dt}" if dt else ""
+            context_parts.append(
+                f"El usuario quiere REAGENDAR su cita de {svc}{dt_info}. "
+                "Pregunta por la nueva fecha y hora preferida."
+            )
 
     error = context_dict.get("last_error")
     if error:

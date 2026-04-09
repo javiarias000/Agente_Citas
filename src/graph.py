@@ -54,6 +54,7 @@ def build_graph(
         node_extract_data,
         node_extract_intent,
         node_generate_response_with_tools,
+        node_lookup_appointment,
         node_prepare_modification,
         node_reschedule_appointment,
         node_route_intent,
@@ -93,6 +94,10 @@ def build_graph(
             db_service=db_service,
         ),
     )
+    graph.add_node(
+        "lookup_appointment",
+        partial(node_lookup_appointment, calendar_service=calendar_service),
+    )
     graph.add_node("prepare_modification", node_prepare_modification)
     graph.add_node(
         "reschedule_appointment",
@@ -130,13 +135,16 @@ def build_graph(
             "extract_intent": "extract_intent",
             "check_missing": "check_missing",
             "check_availability": "check_availability",
-            "handle_modification": "prepare_modification",
+            "handle_modification": "lookup_appointment",
             # Ruta directa a detect_confirmation cuando awaiting_confirmation=True
             # (ej: usuario está eligiendo un slot en el turno siguiente a ver disponibilidad)
             "detect_confirmation": "detect_confirmation",
             "generate_response": "generate_response",
         },
     )
+
+    # lookup_appointment → prepare_modification (siempre, busca cita real en Calendar)
+    graph.add_edge("lookup_appointment", "prepare_modification")
 
     # prepare_modification → detect_confirmation (siempre)
     graph.add_edge("prepare_modification", "detect_confirmation")
@@ -199,6 +207,7 @@ def build_graph(
         {
             "book_appointment": "book_appointment",
             "cancel_appointment": "cancel_appointment",
+            "reschedule_appointment": "reschedule_appointment",
             "validate_slot": "validate_and_confirm",
             "generate_response": "generate_response",
         },
