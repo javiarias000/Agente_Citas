@@ -232,6 +232,9 @@ class ArcadiumState(TypedDict, total=False):
     calendar_lookup_done: bool
     calendar_appointment_found: bool
     existing_appointments: List[Dict[str, Any]]  # citas encontradas (máx 3)
+    calendar_total_for_patient: int              # total de citas del paciente encontradas
+    calendar_slots_available: Optional[int]      # slots libres aproximados en el día solicitado
+    calendar_first_match: Optional[Dict[str, Any]]  # primer evento que coincide exactamente
 
     # --- Control ---
     missing_fields: List[str]
@@ -322,6 +325,9 @@ def create_initial_arcadium_state(
         calendar_lookup_done=False,
         calendar_appointment_found=False,
         existing_appointments=[],
+        calendar_total_for_patient=0,
+        calendar_slots_available=None,
+        calendar_first_match=None,
     )
     # FIX: calcular missing_fields dinámicamente
     base["missing_fields"] = get_missing_fields(base)

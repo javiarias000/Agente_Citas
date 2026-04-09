@@ -23,7 +23,7 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import structlog
 
@@ -523,6 +523,72 @@ async def node_cancel_appointment(
         }
 
 
+def _normalize_phone(phone: str) -> str:
+    """Normaliza teléfono eliminando '+', espacios y guiones para comparación uniforme."""
+    return phone.replace("+", "").replace(" ", "").replace("-", "").strip()
+
+
+def _phone_in_text(phone: str, text: str) -> bool:
+    """
+    Devuelve True si el teléfono normalizado aparece dentro del texto normalizado.
+    Cubre formatos: +5930999…, 5930999…, 0999… (todos se reducen a dígitos puros).
+    """
+    if not phone or not text:
+        return False
+    return _normalize_phone(phone) in _normalize_phone(text)
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    """
+    Devuelve True si el nombre aparece en el texto (insensible a mayúsculas/tildes).
+    Requiere al menos 3 caracteres para evitar falsos positivos con nombres muy cortos.
+    """
+    if not name or len(name) < 3 or not text:
+        return False
+    return name.lower().strip() in text.lower()
+
+
+def _service_in_text(service: str, text: str) -> bool:
+    """
+    Devuelve True si el nombre del servicio aparece en el texto (insensible a mayúsculas).
+    Solo aplica cuando service tiene al menos 3 caracteres.
+    """
+    if not service or len(service) < 3 or not text:
+        return False
+    return service.lower().strip() in text.lower()
+
+
+def _parse_event_start(ev: Dict[str, Any], tz: "ZoneInfo") -> Optional[datetime]:
+    """
+    Parsea el datetime de inicio de un evento de Google Calendar a un datetime tz-aware.
+    Retorna None si no puede parsear.
+    """
+    start_raw = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date", "")
+    if not start_raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(start_raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        return dt
+    except ValueError:
+        return None
+
+
+def _event_to_dict(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """Convierte un evento crudo de Calendar API a un dict normalizado para el estado."""
+    start_raw = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date", "")
+    # Quitar offset de timezone del string para uso interno (la TZ es siempre Guayaquil)
+    dt_str = start_raw.split("+")[0].split("Z")[0] if start_raw else ""
+    return {
+        "event_id": ev.get("id"),
+        "summary": ev.get("summary", ""),
+        "start": dt_str,
+        "html_link": ev.get("htmlLink", ""),
+        "description": (ev.get("description") or "")[:200],
+    }
+
+
 async def node_check_existing_appointment(
     state: ArcadiumState,
     *,
@@ -531,27 +597,58 @@ async def node_check_existing_appointment(
     """
     Forcing tool — SIEMPRE se ejecuta cuando el intent es agendar, cancelar o reagendar.
 
-    Busca en Google Calendar usando DOS estrategias en paralelo:
-      1. Búsqueda por teléfono en la descripción del evento (exacta)
-      2. Búsqueda por nombre del paciente usando el parámetro q= de la API
+    Estrategia de búsqueda (DOS capas):
+      1. list_events en los próximos 60 días → filtrar localmente por teléfono
+      2. search_events_by_query con el nombre del paciente → resultados de la API de Google
 
-    Retorna el primer evento futuro encontrado y actualiza el estado con
-    calendar_lookup_done, calendar_appointment_found y existing_appointments.
+    Filtros aplicados (sin falsos positivos):
+      - PACIENTE: phone en description  OR  patient_name en summary/description
+      - SERVICIO: si selected_service está en el estado, refinar la lista con ese servicio
+      - DÍA: si datetime_preference está en el estado, filtrar para el día exacto
+        (solo en el resultado "servicio+día", no en la búsqueda amplia de "cancelar")
+
+    Retorna:
+      calendar_appointment_found  → True SOLO si hay coincidencia real por paciente
+      existing_appointments       → lista de citas del paciente (máx 3)
+      calendar_total_for_patient  → total de citas encontradas del paciente
+      calendar_slots_available    → slots libres aproximados en el día solicitado (si hay fecha)
+      calendar_first_match        → primer evento que coincide con paciente+servicio+día
+      google_event_id / link      → del evento más reciente del paciente (para cancel/reschedule)
+
     DETERMINISTA — cero LLM.
     """
+    # ── Guard: sin calendar_service ──────────────────────────────────────────
     if not calendar_service:
         logger.warning("node_check_existing_appointment: sin calendar_service")
-        return {"calendar_lookup_done": True, "calendar_appointment_found": False, "existing_appointments": []}
+        return _no_appointment_found()
 
     phone = state.get("phone_number", "")
-    patient_name = state.get("patient_name") or ""
+    patient_name = (state.get("patient_name") or "").strip()
+    service = (state.get("selected_service") or "").strip().lower()
+    dt_pref = state.get("datetime_preference")
+    intent = state.get("intent", "")
+
+    # ── Guard: sin ningún identificador del paciente ─────────────────────────
+    if not phone and not patient_name:
+        logger.warning("node_check_existing_appointment: sin teléfono ni nombre")
+        return _no_appointment_found()
 
     try:
         tz = ZoneInfo("America/Guayaquil")
         now = datetime.now(tz)
         future = now + timedelta(days=60)
 
-        # ── Estrategia 1: todos los eventos del periodo, filtrar por teléfono ──
+        # ── Resolver el día de la cita solicitada (si aplica) ─────────────────
+        # Se usa para: (a) filtrar eventos del mismo día, (b) calcular slots libres.
+        requested_day: Optional[datetime] = None
+        if dt_pref:
+            try:
+                dt_parsed = datetime.fromisoformat(dt_pref)
+                requested_day = dt_parsed.replace(tzinfo=tz) if dt_parsed.tzinfo is None else dt_parsed
+            except ValueError:
+                pass  # dt_pref con formato inválido — se ignora sin romper el flujo
+
+        # ── Estrategia 1: list_events completo → filtro local por teléfono ────
         all_events = await calendar_service.list_events(
             start_date=now,
             end_date=future,
@@ -559,76 +656,89 @@ async def node_check_existing_appointment(
         )
 
         found_by_phone = [
-            e for e in all_events
-            if phone and (
-                phone in (e.get("description") or "")
-                or phone.lstrip("+") in (e.get("description") or "")
-            )
+            ev for ev in all_events
+            if phone and _phone_in_text(phone, ev.get("description") or "")
         ]
 
-        # ── Estrategia 2: búsqueda libre por nombre (q=) ──
-        found_by_name = []
-        if patient_name:
+        # ── Estrategia 2: búsqueda por nombre vía API de Google (q=) ─────────
+        # Solo si hay nombre con suficientes caracteres para evitar resultados ruido.
+        found_by_name: list[Dict[str, Any]] = []
+        if patient_name and len(patient_name) >= 3:
             found_by_name = await calendar_service.search_events_by_query(
                 q=patient_name,
                 start_date=now,
                 end_date=future,
             )
 
-        # Combinar y deduplicar por event_id
-        seen_ids: set = set()
-        combined = []
+        # ── Combinar y deduplicar por event_id ───────────────────────────────
+        seen_ids: set[str] = set()
+        patient_events: list[Dict[str, Any]] = []
         for ev in found_by_phone + found_by_name:
             eid = ev.get("id")
             if eid and eid not in seen_ids:
                 seen_ids.add(eid)
-                combined.append(ev)
+                patient_events.append(ev)
 
-        if not combined:
+        # ── Sin coincidencia real → NO hay cita (sin fallback) ───────────────
+        # Cero uso de eventos "ambient" del calendario para evitar falsos positivos.
+        if not patient_events:
             logger.info(
-                "node_check_existing_appointment: sin citas futuras",
+                "node_check_existing_appointment: sin citas para el paciente",
                 phone=phone,
                 patient_name=patient_name,
-                events_checked=len(all_events),
+                total_events_in_range=len(all_events),
             )
+            # Calcular slots_available del día solicitado aunque no haya cita del paciente
+            slots_avail = _compute_slots_available(all_events, requested_day, service, tz, state)
             return {
-                "calendar_lookup_done": True,
-                "calendar_appointment_found": False,
-                "existing_appointments": [],
-                # Limpiar datos de cita anterior para no contaminar el contexto
-                "google_event_id": None,
-                "google_event_link": None,
-                "appointment_id": None,
-                "datetime_preference": None,
+                **_no_appointment_found(),
+                "calendar_slots_available": slots_avail,
             }
 
-        # Construir lista de citas encontradas (máx 3 para el contexto del LLM)
-        existing = []
-        for ev in combined[:3]:
-            start_raw = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date", "")
-            dt_str = start_raw.split("+")[0].split("Z")[0] if start_raw else ""
-            existing.append({
-                "event_id": ev.get("id"),
-                "summary": ev.get("summary", ""),
-                "start": dt_str,
-                "html_link": ev.get("htmlLink", ""),
-                "description": (ev.get("description") or "")[:200],
-            })
+        # ── Refinar: coincidencia con servicio+día solicitado ─────────────────
+        # Esto responde la pregunta "¿ya tiene una cita para ESTE servicio en ESTE día?"
+        # Solo se aplica cuando ambos están disponibles (intent "agendar" normalmente).
+        first_exact_match: Optional[Dict[str, Any]] = None
+        if service and requested_day:
+            for ev in patient_events:
+                # Verificar que el evento es del mismo día calendario
+                ev_start = _parse_event_start(ev, tz)
+                if ev_start is None:
+                    continue
+                same_day = ev_start.date() == requested_day.date()
+                # Verificar que el servicio aparece en el summary (formato: "servicio - Nombre")
+                has_service = _service_in_text(service, ev.get("summary") or "")
+                if same_day and has_service:
+                    first_exact_match = _event_to_dict(ev)
+                    break
 
+        # ── Construir lista de citas del paciente (máx 3) ─────────────────────
+        existing = [_event_to_dict(ev) for ev in patient_events[:3]]
         first = existing[0]
+
+        # ── Calcular slots libres aproximados en el día solicitado ────────────
+        slots_avail = _compute_slots_available(all_events, requested_day, service, tz, state)
+
         logger.info(
-            "node_check_existing_appointment: citas encontradas",
+            "node_check_existing_appointment: citas del paciente encontradas",
             phone=phone,
-            count=len(existing),
-            first_event=first.get("event_id"),
-            first_start=first.get("start"),
+            patient_name=patient_name,
+            intent=intent,
+            total_patient_events=len(patient_events),
+            exact_match_found=first_exact_match is not None,
+            matched_by_phone=len(found_by_phone) > 0,
+            matched_by_name=len(found_by_name) > 0,
+            slots_available=slots_avail,
         )
 
         return {
             "calendar_lookup_done": True,
             "calendar_appointment_found": True,
             "existing_appointments": existing,
-            # Poblar campos del estado con la primera cita encontrada
+            "calendar_total_for_patient": len(patient_events),
+            "calendar_slots_available": slots_avail,
+            "calendar_first_match": first_exact_match,
+            # Poblar con la primera cita del paciente (útil para cancel/reschedule)
             "google_event_id": first["event_id"],
             "google_event_link": first["html_link"],
             "datetime_preference": first["start"],
@@ -636,11 +746,66 @@ async def node_check_existing_appointment(
 
     except Exception as e:
         logger.error("node_check_existing_appointment: error", error=str(e))
-        return {
-            "calendar_lookup_done": True,
-            "calendar_appointment_found": False,
-            "existing_appointments": [],
-        }
+        return _no_appointment_found()
+
+
+def _no_appointment_found() -> Dict[str, Any]:
+    """Dict base de respuesta cuando no se encuentra cita del paciente."""
+    return {
+        "calendar_lookup_done": True,
+        "calendar_appointment_found": False,
+        "existing_appointments": [],
+        "calendar_total_for_patient": 0,
+        "calendar_slots_available": None,
+        "calendar_first_match": None,
+        # Limpiar datos de cita anterior para no contaminar el contexto del LLM
+        "google_event_id": None,
+        "google_event_link": None,
+        "appointment_id": None,
+        "datetime_preference": None,
+    }
+
+
+def _compute_slots_available(
+    all_events: list,
+    requested_day: Optional[datetime],
+    service: str,
+    tz: "ZoneInfo",
+    state: Dict[str, Any],
+) -> Optional[int]:
+    """
+    Calcula de forma aproximada cuántos slots quedan libres en el día solicitado.
+
+    Fórmula:
+        total_slots = floor(business_minutes / service_duration)
+        busy_slots  = número de eventos que ya existen en ese día
+        available   = max(0, total_slots - busy_slots)
+
+    Retorna None si no hay fecha de referencia.
+    """
+    if requested_day is None:
+        return None
+
+    from src.state import BUSINESS_HOURS, VALID_SERVICES, SLOT_MINUTES
+
+    # Duración del servicio: usar la del estado o buscarla en VALID_SERVICES
+    duration = state.get("service_duration")
+    if not duration and service:
+        duration = VALID_SERVICES.get(service)
+    if not duration:
+        duration = SLOT_MINUTES  # default 30 min
+
+    business_minutes = (BUSINESS_HOURS[1] - BUSINESS_HOURS[0]) * 60  # ej. (18-9)*60 = 540
+    total_slots = business_minutes // duration
+
+    # Contar eventos que caen en el día solicitado
+    busy = sum(
+        1 for ev in all_events
+        if (_parse_event_start(ev, tz) or datetime.min.replace(tzinfo=tz)).date()
+        == requested_day.date()
+    )
+
+    return max(0, total_slots - busy)
 
 
 async def node_lookup_appointment(
