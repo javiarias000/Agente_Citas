@@ -523,6 +523,126 @@ async def node_cancel_appointment(
         }
 
 
+async def node_check_existing_appointment(
+    state: ArcadiumState,
+    *,
+    calendar_service=None,
+) -> Dict[str, Any]:
+    """
+    Forcing tool — SIEMPRE se ejecuta cuando el intent es agendar, cancelar o reagendar.
+
+    Busca en Google Calendar usando DOS estrategias en paralelo:
+      1. Búsqueda por teléfono en la descripción del evento (exacta)
+      2. Búsqueda por nombre del paciente usando el parámetro q= de la API
+
+    Retorna el primer evento futuro encontrado y actualiza el estado con
+    calendar_lookup_done, calendar_appointment_found y existing_appointments.
+    DETERMINISTA — cero LLM.
+    """
+    if not calendar_service:
+        logger.warning("node_check_existing_appointment: sin calendar_service")
+        return {"calendar_lookup_done": True, "calendar_appointment_found": False, "existing_appointments": []}
+
+    phone = state.get("phone_number", "")
+    patient_name = state.get("patient_name") or ""
+
+    try:
+        tz = ZoneInfo("America/Guayaquil")
+        now = datetime.now(tz)
+        future = now + timedelta(days=60)
+
+        # ── Estrategia 1: todos los eventos del periodo, filtrar por teléfono ──
+        all_events = await calendar_service.list_events(
+            start_date=now,
+            end_date=future,
+            max_results=50,
+        )
+
+        found_by_phone = [
+            e for e in all_events
+            if phone and (
+                phone in (e.get("description") or "")
+                or phone.lstrip("+") in (e.get("description") or "")
+            )
+        ]
+
+        # ── Estrategia 2: búsqueda libre por nombre (q=) ──
+        found_by_name = []
+        if patient_name:
+            found_by_name = await calendar_service.search_events_by_query(
+                q=patient_name,
+                start_date=now,
+                end_date=future,
+            )
+
+        # Combinar y deduplicar por event_id
+        seen_ids: set = set()
+        combined = []
+        for ev in found_by_phone + found_by_name:
+            eid = ev.get("id")
+            if eid and eid not in seen_ids:
+                seen_ids.add(eid)
+                combined.append(ev)
+
+        if not combined:
+            logger.info(
+                "node_check_existing_appointment: sin citas futuras",
+                phone=phone,
+                patient_name=patient_name,
+                events_checked=len(all_events),
+            )
+            return {
+                "calendar_lookup_done": True,
+                "calendar_appointment_found": False,
+                "existing_appointments": [],
+                # Limpiar datos de cita anterior para no contaminar el contexto
+                "google_event_id": None,
+                "google_event_link": None,
+                "appointment_id": None,
+                "datetime_preference": None,
+            }
+
+        # Construir lista de citas encontradas (máx 3 para el contexto del LLM)
+        existing = []
+        for ev in combined[:3]:
+            start_raw = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date", "")
+            dt_str = start_raw.split("+")[0].split("Z")[0] if start_raw else ""
+            existing.append({
+                "event_id": ev.get("id"),
+                "summary": ev.get("summary", ""),
+                "start": dt_str,
+                "html_link": ev.get("htmlLink", ""),
+                "description": (ev.get("description") or "")[:200],
+            })
+
+        first = existing[0]
+        logger.info(
+            "node_check_existing_appointment: citas encontradas",
+            phone=phone,
+            count=len(existing),
+            first_event=first.get("event_id"),
+            first_start=first.get("start"),
+        )
+
+        return {
+            "calendar_lookup_done": True,
+            "calendar_appointment_found": True,
+            "existing_appointments": existing,
+            # Poblar campos del estado con la primera cita encontrada
+            "google_event_id": first["event_id"],
+            "google_event_link": first["html_link"],
+            "datetime_preference": first["start"],
+        }
+
+    except Exception as e:
+        logger.error("node_check_existing_appointment: error", error=str(e))
+        return {
+            "calendar_lookup_done": True,
+            "calendar_appointment_found": False,
+            "existing_appointments": [],
+        }
+
+
 async def node_lookup_appointment(
     state: ArcadiumState,
     *,
@@ -971,6 +1091,10 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
         "last_error": state.get("last_error"),
         "conversation_turns": state.get("conversation_turns", 0),
         "semantic_memory_context": state.get("semantic_memory_context", ""),
+        # Campos del forcing tool
+        "calendar_lookup_done": state.get("calendar_lookup_done", False),
+        "calendar_appointment_found": state.get("calendar_appointment_found", False),
+        "existing_appointments": state.get("existing_appointments", []),
     }
 
 
@@ -980,6 +1104,20 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
 
 from datetime import datetime
 from typing import Dict, Any
+
+
+def _format_datetime_readable(iso_str: str) -> str:
+    """Convierte ISO string a texto legible: 'jueves 10 de abril a las 11:00'."""
+    if not iso_str:
+        return "fecha desconocida"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+        meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+                 "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+        return f"{dias[dt.weekday()]} {dt.day} de {meses[dt.month - 1]} a las {dt.strftime('%H:%M')}"
+    except Exception:
+        return iso_str
 
 
 def _format_slots(slots):
@@ -1065,6 +1203,25 @@ async def node_generate_response_with_tools(
     ctype = context_dict.get("confirmation_type")
     confirmation_sent = context_dict.get("confirmation_sent", False)
     appt_id = context_dict.get("appointment_id")
+    lookup_done = context_dict.get("calendar_lookup_done", False)
+    cal_found = context_dict.get("calendar_appointment_found", False)
+    existing_appts = context_dict.get("existing_appointments", [])
+
+    # ── Forcing tool: resultado de verificación en Calendar ──────────────
+    if lookup_done and cal_found and existing_appts and intent == "agendar":
+        # Usuario quiere agendar pero YA TIENE cita(s)
+        lines = []
+        for appt in existing_appts[:2]:
+            svc_name = appt.get("summary", "cita")
+            start_dt = appt.get("start", "")
+            lines.append(f"• {svc_name} — {_format_datetime_readable(start_dt)}")
+        appts_str = "\n".join(lines)
+        context_parts.append(
+            f"IMPORTANTE: Se consultó Google Calendar y el paciente YA TIENE cita(s) agendada(s):\n"
+            f"{appts_str}\n"
+            "Informa al usuario sobre su(s) cita(s) existente(s) y pregunta si desea "
+            "reagendar, cancelar o agregar una cita adicional."
+        )
 
     if confirmation_sent and ctype == "cancel":
         # Cancelación ejecutada exitosamente
@@ -1081,8 +1238,8 @@ async def node_generate_response_with_tools(
             f"La cita de {svc} ha sido reagendada para {slot}. Confirma con formato: "
             f'"Su cita de {{servicio}} ha sido reagendada para el {{día}} a las {{hora}}."'
         )
-    elif appt_id and (not ctype or ctype == "book"):
-        # Booking nuevo ejecutado exitosamente
+    elif confirmation_sent and appt_id and (not ctype or ctype == "book"):
+        # Booking nuevo ejecutado exitosamente EN ESTE TURNO
         svc = context_dict.get("selected_service", "")
         slot = context_dict.get("selected_slot") or context_dict.get("datetime_preference", "")
         context_parts.append(

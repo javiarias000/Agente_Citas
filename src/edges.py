@@ -41,12 +41,12 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
     if not intent:
         return "extract_intent"  # Fallback LLM
 
-    if intent == "agendar":
-        return "check_missing"
+    # Forcing tool: verificar Calendar antes de operar sobre citas
+    if intent in ("agendar", "cancelar", "reagendar"):
+        return "check_existing_appointment"
+
     if intent == "consultar":
         return "check_availability"
-    if intent in ("cancelar", "reagendar"):
-        return "handle_modification"
 
     return "generate_response"  # "otro" o no reconocido
 
@@ -144,6 +144,28 @@ def edge_after_adjust_weekend(state: Dict[str, Any]) -> str:
     Después de ajuste de fin de semana, verificar disponibilidad.
     """
     return "check_missing"
+
+
+def edge_after_check_existing(state: Dict[str, Any]) -> str:
+    """
+    Después de node_check_existing_appointment (forcing tool).
+
+    - Para intent "agendar":
+        · Encontró cita  → generate_response (informar, ofrecer reagendar/cancelar)
+        · No encontró    → check_missing (continuar flujo de agendamiento)
+
+    - Para intent "cancelar" / "reagendar":
+        · Encontró cita  → prepare_modification (tiene el event_id para operar)
+        · No encontró    → generate_response (informar que no hay cita)
+    """
+    intent = state.get("intent", "")
+    found = state.get("calendar_appointment_found", False)
+
+    if intent == "agendar":
+        return "generate_response" if found else "check_missing"
+
+    # cancelar / reagendar
+    return "prepare_modification" if found else "generate_response"
 
 
 def edge_after_validate(state: Dict[str, Any]) -> str:

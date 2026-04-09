@@ -118,7 +118,7 @@ class ArcadiumAPI:
     API principal de Arcadium.
     Maneja webhooks de WhatsApp y Chatwoot y los enruta al agente correcto.
     """
-
+    
     # FIX: límite máximo de agentes en cache (LRU)
     _AGENT_CACHE_MAX = 500
 
@@ -128,6 +128,21 @@ class ArcadiumAPI:
         self.memory_manager: Optional[MemoryManager] = None
         self.whatsapp_service: Optional[WhatsAppService] = None
         self.chatwoot_service: Optional[ChatwootService] = None
+
+        from services.google_calendar_service import GoogleCalendarService
+
+        # Inicializar servicio de calendario
+        try:
+            self._calendar_service = GoogleCalendarService(
+                calendar_id=self.settings.GOOGLE_CALENDAR_DEFAULT_ID,
+                credentials_path=self.settings.GOOGLE_CALENDAR_CREDENTIALS_PATH,
+                timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
+                redirect_uri=self.settings.GOOGLE_REDIRECT_URI,
+            )
+            logger.info("Calendar service inicializado correctamente")
+        except Exception as e:
+            logger.error("Error inicializando calendar service", error=str(e))
+            self._calendar_service = None
 
         # FIX: OrderedDict para implementar LRU simple en el cache de agentes
         self._agents: OrderedDict[str, Any] = OrderedDict()
@@ -140,7 +155,9 @@ class ArcadiumAPI:
 
         # Stores para LangGraph (se inicializan en _init_langgraph)
         self.state_store = None  # Store para historial y estado (BaseStore)
-        self.vector_store = None  # Store vectorial para memorias semánticas (langgraph BaseStore)
+        self.vector_store = (
+            None  # Store vectorial para memorias semánticas (langgraph BaseStore)
+        )
 
         logger.info("ArcadiumAPI creada")
 
@@ -200,8 +217,11 @@ class ArcadiumAPI:
     async def _init_langgraph(self) -> None:
         try:
             from langchain_openai import ChatOpenAI
-            from src.graph import compile_graph
+
             from memory_agent_integration.memory_agent_backend import MemoryAgentBackend
+            from src.graph import compile_graph
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver as PostgresSaver
+
 
             # 1. Backend unificado: historial secuencial + vector store semántico.
             #    Reemplaza el PostgresStore + vector_store separados anteriores.
@@ -212,7 +232,9 @@ class ArcadiumAPI:
             await self.state_store.initialize()
 
             # Exponer el vector store interno para los nodos del grafo
-            self.vector_store = self.state_store.store if self.settings.USE_MEMORY_AGENT else None
+            self.vector_store = (
+                self.state_store.store if self.settings.USE_MEMORY_AGENT else None
+            )
 
             # 2. LLM
             self.langgraph_llm = ChatOpenAI(
@@ -221,18 +243,45 @@ class ArcadiumAPI:
             )
 
             # 3. Compilar grafo
+            # AsyncPostgresSaver requiere psycopg3 (postgresql+psycopg://...)
+            # 3. Compilar grafo
+
+            pg_url = self.settings.DATABASE_URL
+
+            # limpiar drivers
+            pg_url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+            pg_url = pg_url.replace("postgresql+psycopg2://", "postgresql://")
+            pg_url = pg_url.replace("postgresql+psycopg://", "postgresql://")
+
+            # SSL para Supabase
+            if "supabase.co" in pg_url:
+                if "sslmode=" not in pg_url:
+                    pg_url += "?sslmode=require"
+
+            # abrir conexión correctamente
+            self.checkpointer_ctx = PostgresSaver.from_conn_string(pg_url)
+            self.checkpointer = await self.checkpointer_ctx.__aenter__()
+
+            logger.info(
+                "Calendar service estado",
+                is_none=self._calendar_service is None
+            )
+            # compilar grafo
             self.langgraph_graph = compile_graph(
                 llm=self.langgraph_llm,
                 store=self.state_store,
                 vector_store=self.vector_store,
                 calendar_service=getattr(self, "_calendar_service", None),
                 db_service=None,
+                checkpointer=self.checkpointer,
             )
 
             logger.info(
                 "LangGraph components inicializados",
                 state_store=type(self.state_store).__name__,
-                vector_store=type(self.vector_store).__name__ if self.vector_store else None,
+                vector_store=type(self.vector_store).__name__
+                if self.vector_store
+                else None,
             )
         except Exception as e:
             logger.error("Error inicializando LangGraph", error=str(e), exc_info=True)
@@ -1079,6 +1128,7 @@ class ArcadiumAPI:
                     project_id=project_id,
                 )
             elif self.settings.ENABLE_STATE_MACHINE:
+                
                 from agents.router_agent import RouterAgent
 
                 agent = RouterAgent(

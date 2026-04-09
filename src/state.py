@@ -167,8 +167,9 @@ TRANSIENT_FIELDS: Set[str] = {
     # Se limpia en node_book_appointment y node_reschedule_appointment tras completar.
     "semantic_memory_context",  # contexto semántico (se regenera cada turno)
     "_tool_iterations",  # contador de iteraciones de tool-calling
-    "calendar_lookup_done",   # se recalcula en cada turno de cancelar/reagendar
+    "calendar_lookup_done",   # se recalcula en cada turno de agendar/cancelar/reagendar
     "calendar_appointment_found",
+    "existing_appointments",  # lista de citas encontradas (se recalcula cada turno)
 }
 
 
@@ -227,9 +228,10 @@ class ArcadiumState(TypedDict, total=False):
     # --- Contexto semántico (inyectado por agent.py, descartado en save) ---
     semantic_memory_context: Optional[str]
 
-    # --- Lookup de cita en Calendar (transient, se recalcula cada turno) ---
+    # --- Forcing tool: verificación real en Calendar (transient, se recalcula cada turno) ---
     calendar_lookup_done: bool
     calendar_appointment_found: bool
+    existing_appointments: List[Dict[str, Any]]  # citas encontradas (máx 3)
 
     # --- Control ---
     missing_fields: List[str]
@@ -316,6 +318,10 @@ def create_initial_arcadium_state(
         errors_count=0,
         should_escalate=False,
         _extract_data_calls=0,
+        # Forcing tool — se recalcula cada turno
+        calendar_lookup_done=False,
+        calendar_appointment_found=False,
+        existing_appointments=[],
     )
     # FIX: calcular missing_fields dinámicamente
     base["missing_fields"] = get_missing_fields(base)

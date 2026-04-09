@@ -34,6 +34,7 @@ def build_graph(
     """
     from src.edges import (
         edge_after_adjust_weekend,
+        edge_after_check_existing,
         edge_after_check_missing,
         edge_after_confirm,
         edge_after_extract_data,
@@ -47,6 +48,7 @@ def build_graph(
         node_book_appointment,
         node_cancel_appointment,
         node_check_availability,
+        node_check_existing_appointment,
         node_check_missing,
         node_detect_confirmation,
         node_entry,
@@ -94,6 +96,11 @@ def build_graph(
             db_service=db_service,
         ),
     )
+    # Forcing tool: verificación real en Calendar antes de operar sobre citas
+    graph.add_node(
+        "check_existing_appointment",
+        partial(node_check_existing_appointment, calendar_service=calendar_service),
+    )
     graph.add_node(
         "lookup_appointment",
         partial(node_lookup_appointment, calendar_service=calendar_service),
@@ -133,24 +140,44 @@ def build_graph(
         edge_after_route_intent,
         {
             "extract_intent": "extract_intent",
-            "check_missing": "check_missing",
+            # agendar/cancelar/reagendar pasan por el forcing tool
+            "check_existing_appointment": "check_existing_appointment",
             "check_availability": "check_availability",
-            "handle_modification": "lookup_appointment",
             # Ruta directa a detect_confirmation cuando awaiting_confirmation=True
-            # (ej: usuario está eligiendo un slot en el turno siguiente a ver disponibilidad)
             "detect_confirmation": "detect_confirmation",
             "generate_response": "generate_response",
         },
     )
 
-    # lookup_appointment → prepare_modification (siempre, busca cita real en Calendar)
+    # check_existing_appointment → routing según intent + resultado Calendar
+    graph.add_conditional_edges(
+        "check_existing_appointment",
+        edge_after_check_existing,
+        {
+            "check_missing": "check_missing",       # agendar, sin cita existente
+            "prepare_modification": "prepare_modification",  # cancelar/reagendar, cita encontrada
+            "generate_response": "generate_response",  # agendar con cita existente, o sin cita
+        },
+    )
+
+    # lookup_appointment → prepare_modification (ruta legacy, se mantiene por compatibilidad)
     graph.add_edge("lookup_appointment", "prepare_modification")
 
     # prepare_modification → detect_confirmation (siempre)
     graph.add_edge("prepare_modification", "detect_confirmation")
 
-    # extract_intent → check_missing (ya se determinó el intent, ahora verificar datos)
-    graph.add_edge("extract_intent", "check_missing")
+    # extract_intent → forcing tool o check_missing según intent
+    # Si el LLM detectó agendar/cancelar/reagendar, también pasa por el forcing tool
+    graph.add_conditional_edges(
+        "extract_intent",
+        lambda s: "check_existing_appointment"
+        if s.get("intent") in ("agendar", "cancelar", "reagendar")
+        else "check_missing",
+        {
+            "check_existing_appointment": "check_existing_appointment",
+            "check_missing": "check_missing",
+        },
+    )
 
     # check_missing → routing
     graph.add_conditional_edges(

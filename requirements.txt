@@ -22,7 +22,8 @@ websockets>=12.0
 redis>=5.0.0
 sqlalchemy>=2.0.0
 alembic>=1.13.0
-psycopg2-binary>=2.9.9
+psycopg2-binary>=2.9.11
+psycopg[binary,pool]
 
 # Monitoreo
 prometheus-client>=0.19.0
@@ -47,6 +48,7 @@ httpx>=0.25.0
 # Base de datos PostgreSQL
 psycopg2-binary>=2.9.9
 pgvector>=0.2.0
+langgraph-checkpoint-postgres
 
 # LangChain moderno (sin deprecated)
 langchain>=0.1.0

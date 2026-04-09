@@ -122,17 +122,9 @@ class ArcadiumAgent:
         try:
             prev_state = await self.store.get_agent_state(phone)
             if prev_state:
+                # Campos estables — siempre se restauran
                 for f in [
                     "patient_name",
-                    "selected_service",
-                    "service_duration",
-                    "intent",
-                    "datetime_preference",
-                    "available_slots",
-                    "selected_slot",
-                    "appointment_id",
-                    "google_event_id",
-                    "google_event_link",
                     "conversation_turns",
                     "awaiting_confirmation",
                     "confirmation_type",
@@ -140,6 +132,25 @@ class ArcadiumAgent:
                 ]:
                     if f in prev_state and prev_state[f] is not None:
                         state[f] = prev_state[f]
+
+                # Campos transientes — solo se restauran si el turno anterior
+                # quedó esperando una confirmación (flujo en progreso).
+                # Si no estamos esperando nada, son datos de una cita ya
+                # completada en sesión anterior y no deben contaminar el contexto.
+                if prev_state.get("awaiting_confirmation"):
+                    for f in [
+                        "selected_service",
+                        "service_duration",
+                        "intent",
+                        "datetime_preference",
+                        "available_slots",
+                        "selected_slot",
+                        "appointment_id",
+                        "google_event_id",
+                        "google_event_link",
+                    ]:
+                        if f in prev_state and prev_state[f] is not None:
+                            state[f] = prev_state[f]
         except Exception as e:
             logger.warning("No se pudo cargar estado previo", error=str(e))
 

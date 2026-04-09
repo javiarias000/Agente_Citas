@@ -75,6 +75,44 @@ class GoogleCalendarService:
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception(lambda e: isinstance(e, HttpError)),
     )
+    async def search_events_by_query(
+        self,
+        q: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        max_results: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Busca eventos en Calendar usando texto libre (q=).
+
+        Args:
+            q: Texto a buscar (nombre paciente, teléfono, etc.)
+            start_date: Inicio del rango (default: ahora)
+            end_date: Fin del rango (default: 60 días desde ahora)
+            max_results: Máximo eventos
+
+        Returns:
+            Lista de eventos que coincidan
+        """
+        now = datetime.now(TIMEZONE)
+        start = start_date or now
+        end = end_date or (now + timedelta(days=60))
+        try:
+            return await self._svc.search_events_by_query(
+                q=q,
+                start_date=start,
+                end_date=end,
+                max_results=max_results,
+            )
+        except Exception as e:
+            logger.error("Error en search_events_by_query", q=q, error=str(e))
+            return []
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception(lambda e: isinstance(e, HttpError)),
+    )
     async def create_event(
         self,
         start: datetime,
