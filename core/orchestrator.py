@@ -129,17 +129,17 @@ class ArcadiumAPI:
         self.whatsapp_service: Optional[WhatsAppService] = None
         self.chatwoot_service: Optional[ChatwootService] = None
 
-        from services.google_calendar_service import GoogleCalendarService
+        from services.composio_calendar_service import ComposioCalendarService
 
-        # Inicializar servicio de calendario
+        # Instanciar servicio de calendario (initialize() async se llama en _init_langgraph)
         try:
-            self._calendar_service = GoogleCalendarService(
+            self._calendar_service = ComposioCalendarService(
                 calendar_id=self.settings.GOOGLE_CALENDAR_DEFAULT_ID,
                 timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
             )
-            logger.info("Calendar service inicializado correctamente")
+            logger.info("ComposioCalendarService instanciado (pendiente initialize())")
         except Exception as e:
-            logger.error("Error inicializando calendar service", error=str(e))
+            logger.error("Error instanciando ComposioCalendarService", error=str(e))
             self._calendar_service = None
 
         # FIX: OrderedDict para implementar LRU simple en el cache de agentes
@@ -264,10 +264,19 @@ class ArcadiumAPI:
             self.checkpointer_ctx = PostgresSaver.from_conn_string(pg_url, serde=_serde)
             self.checkpointer = await self.checkpointer_ctx.__aenter__()
 
-            logger.info(
-                "Calendar service estado",
-                is_none=self._calendar_service is None
-            )
+            # Inicializar ComposioCalendarService (async — carga tools MCP)
+            if self._calendar_service is not None:
+                try:
+                    await self._calendar_service.initialize()
+                    logger.info("ComposioCalendarService inicializado correctamente")
+                except Exception as e:
+                    logger.error(
+                        "Error inicializando ComposioCalendarService — calendar_service=None",
+                        error=str(e),
+                    )
+                    self._calendar_service = None
+            else:
+                logger.warning("calendar_service es None — operaciones de Calendar no disponibles")
 
             # Instanciar AppointmentService para persistencia en DB
             try:

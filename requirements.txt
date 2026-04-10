@@ -56,11 +56,15 @@ langchain-openai>=0.1.0
 langchain-community>=0.0.10
 langchain-postgres>=0.0.9
 
-# Google Calendar (via langchain-google-community)
+# Google Calendar (via langchain-google-community) - mantener para fallback
 langchain-google-community[calendar]>=2.0.0
 google-api-python-client>=2.0.0
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=0.4.1
 google-auth>=2.0.0
+
+# Composio MCP - Google Calendar via MCP
+composio-langchain>=0.7.0
+langchain-mcp-adapters>=0.1.0
 
 
