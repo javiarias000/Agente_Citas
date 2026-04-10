@@ -268,13 +268,23 @@ class ArcadiumAPI:
                 "Calendar service estado",
                 is_none=self._calendar_service is None
             )
+
+            # Instanciar AppointmentService para persistencia en DB
+            try:
+                from services.appointment_service import AppointmentService
+                _db_service = AppointmentService()
+                logger.info("AppointmentService instanciado para db_service")
+            except Exception as e:
+                logger.warning("No se pudo instanciar AppointmentService, db_service=None", error=str(e))
+                _db_service = None
+
             # compilar grafo
             self.langgraph_graph = compile_graph(
                 llm=self.langgraph_llm,
                 store=self.state_store,
                 vector_store=self.vector_store,
                 calendar_service=getattr(self, "_calendar_service", None),
-                db_service=None,
+                db_service=_db_service,
                 checkpointer=self.checkpointer,
             )
 

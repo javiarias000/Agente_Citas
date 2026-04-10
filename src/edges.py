@@ -47,6 +47,13 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
     if awaiting and ctype in ("cancel", "reschedule"):
         return "detect_confirmation"
 
+    # GUARDIA DE SEGURIDAD: si hay slots disponibles en el estado (de un turno previo)
+    # y el usuario no está cancelando/reagendando explícitamente, tratarlo como
+    # confirmación. Esto cubre el caso donde awaiting_confirmation no se restauró
+    # correctamente pero los slots sí están en el estado.
+    if state.get("available_slots") and intent not in ("cancelar", "reagendar"):
+        return "detect_confirmation"
+
     if not intent:
         return "extract_intent"  # Fallback LLM
 

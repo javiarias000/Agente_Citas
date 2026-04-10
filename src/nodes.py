@@ -410,10 +410,33 @@ async def node_book_appointment(
     """
     Agenda en Google Calendar y DB.
     DETERMINISTA — cero llamadas al LLM.
+
+    INVARIANTE CRÍTICO: NUNCA retorna confirmation_sent=True si google_event_id es None.
+    Si no hay evento en Calendar, retorna error. El LLM NO debe confirmar citas falsas.
     """
+    logger.info(
+        "[node_book_appointment] iniciando",
+        phone=state.get("phone_number", ""),
+        service=state.get("selected_service", ""),
+        slot=state.get("selected_slot") or state.get("datetime_preference", ""),
+        has_calendar_service=calendar_service is not None,
+    )
+
     slot = state.get("selected_slot") or state.get("datetime_preference")
     if not slot:
+        logger.error("[node_book_appointment] sin slot para agendar")
         return {"last_error": "No hay slot seleccionado para agendar"}
+
+    # GUARD: calendar_service es OBLIGATORIO — sin él no hay cita real
+    if not calendar_service:
+        logger.error("[node_book_appointment] calendar_service no disponible — abortando")
+        return {
+            "last_error": (
+                "El servicio de Google Calendar no está disponible en este momento. "
+                "Por favor llame a la clínica directamente. 📞"
+            ),
+            "should_escalate": False,
+        }
 
     try:
         dt = datetime.fromisoformat(slot)
@@ -424,19 +447,43 @@ async def node_book_appointment(
         service = state.get("selected_service", "consulta")
 
         # Crear en Google Calendar
-        event_id = None
-        event_link = None
-        if calendar_service:
-            event = await calendar_service.create_event(
-                title=f"{service} - {patient}",
-                start_time=dt,
-                end_time=end_dt,
-                description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
-            )
-            event_id = event.get("id")
-            event_link = event.get("htmlLink")
+        logger.info(
+            "[node_book_appointment] llamando create_event",
+            patient=patient,
+            service=service,
+            start=dt.isoformat(),
+            end=end_dt.isoformat(),
+        )
+        event = await calendar_service.create_event(
+            title=f"{service} - {patient}",
+            start_time=dt,
+            end_time=end_dt,
+            description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
+        )
+        event_id = event.get("id")
+        event_link = event.get("htmlLink")
 
-        # Crear en DB
+        # GUARD: verificar que el evento fue realmente creado
+        if not event_id:
+            logger.error(
+                "[node_book_appointment] create_event no devolvió ID — fallo silencioso en Calendar",
+                event_response=str(event)[:200],
+            )
+            return {
+                "last_error": "Error confirmando la cita en Google Calendar (sin ID). Por favor llame a la clínica. 📞",
+                "should_escalate": True,
+            }
+
+        logger.info(
+            "[node_book_appointment] evento creado EXITOSAMENTE en Google Calendar",
+            event_id=event_id,
+            event_link=event_link,
+            patient=patient,
+            service=service,
+            slot=slot,
+        )
+
+        # Crear en DB (opcional — no bloquea el flujo)
         appt_id = None
         if db_service:
             try:
@@ -451,20 +498,14 @@ async def node_book_appointment(
                 if appt:
                     appt_id = str(appt.id)
             except Exception as e:
-                logger.warning("Error creando cita en DB", error=str(e))
-
-        logger.info(
-            "Cita agendada",
-            patient=patient,
-            service=service,
-            slot=slot,
-            event_id=event_id,
-        )
+                logger.warning("[node_book_appointment] error creando cita en DB (no crítico)", error=str(e))
 
         return {
-            "appointment_id": appt_id or "pending_db",
+            # Usar event_id como fallback para appointment_id si no hay DB
+            "appointment_id": appt_id or f"gcal_{event_id}",
             "google_event_id": event_id,
             "google_event_link": event_link,
+            # confirmation_sent=True SOLO cuando google_event_id está confirmado
             "confirmation_sent": True,
             "current_step": "resolution",
             # Limpiar estado de selección para no reutilizar en próximos turnos
@@ -474,6 +515,11 @@ async def node_book_appointment(
         }
 
     except Exception as e:
+        logger.error(
+            "[node_book_appointment] excepción al agendar",
+            error=str(e),
+            phone=state.get("phone_number", ""),
+        )
         return {
             "last_error": f"Error agendando cita: {e}",
             "should_escalate": True,
@@ -1368,9 +1414,23 @@ async def node_generate_response_with_tools(
     ctype = context_dict.get("confirmation_type")
     confirmation_sent = context_dict.get("confirmation_sent", False)
     appt_id = context_dict.get("appointment_id")
+    # CRÍTICO: usar google_event_id como fuente de verdad — appointment_id puede ser
+    # "gcal_..." o "pending_db", pero solo google_event_id garantiza que el evento existe.
+    google_event_id = context_dict.get("google_event_id")
     lookup_done = context_dict.get("calendar_lookup_done", False)
     cal_found = context_dict.get("calendar_appointment_found", False)
     existing_appts = context_dict.get("existing_appointments", [])
+    awaiting = context_dict.get("awaiting_confirmation", False)
+
+    # ── GUARDIA CRÍTICA: prevenir que el LLM confirme antes de que booking_node ejecute ──
+    # Si estamos esperando confirmación del usuario (slots mostrados, sin booking aún),
+    # instrucción explícita de NO confirmar la cita.
+    if awaiting and ctype == "book" and not confirmation_sent and not google_event_id:
+        context_parts.append(
+            "⚠️ INSTRUCCIÓN CRÍTICA: La cita AÚN NO ha sido creada en el sistema. "
+            "Muestra los horarios disponibles y pide al usuario que confirme cuál prefiere. "
+            "PROHIBIDO decir 'Su cita ha sido agendada' o frases similares hasta que el sistema lo confirme."
+        )
 
     # ── Forcing tool: resultado de verificación en Calendar ──────────────
     if lookup_done and cal_found and existing_appts and intent == "agendar":
@@ -1395,20 +1455,21 @@ async def node_generate_response_with_tools(
             f"La cita de {svc} ha sido cancelada exitosamente. Confirma al usuario con formato: "
             f'"Su cita de {{servicio}} ha sido cancelada exitosamente."'
         )
-    elif confirmation_sent and ctype == "reschedule" and appt_id:
-        # Reagendamiento ejecutado exitosamente
+    elif confirmation_sent and ctype == "reschedule" and google_event_id:
+        # Reagendamiento ejecutado exitosamente — verificado por google_event_id
         svc = context_dict.get("selected_service", "")
         slot = context_dict.get("selected_slot") or context_dict.get("datetime_preference", "")
         context_parts.append(
             f"La cita de {svc} ha sido reagendada para {slot}. Confirma con formato: "
             f'"Su cita de {{servicio}} ha sido reagendada para el {{día}} a las {{hora}}."'
         )
-    elif confirmation_sent and appt_id and (not ctype or ctype == "book"):
-        # Booking nuevo ejecutado exitosamente EN ESTE TURNO
+    elif confirmation_sent and google_event_id and (not ctype or ctype == "book"):
+        # Booking nuevo ejecutado exitosamente — verificado por google_event_id en Calendar
         svc = context_dict.get("selected_service", "")
         slot = context_dict.get("selected_slot") or context_dict.get("datetime_preference", "")
         context_parts.append(
-            f"Cita agendada exitosamente: {svc} el {slot}. Confirma con formato: "
+            f"Cita agendada exitosamente (Google Calendar ID: {google_event_id}): "
+            f"{svc} el {slot}. Confirma con formato: "
             f'"Su cita de {{servicio}} ha sido agendada para el {{día}} a las {{hora}}."'
         )
     elif ctype == "cancel" and not confirmation_sent:
