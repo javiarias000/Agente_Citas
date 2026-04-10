@@ -100,10 +100,12 @@ def detect_confirmation(text: str) -> Literal["yes", "no", "slot_choice", "unkno
     if normalized in CONFIRM_NO:
         return "no"
 
-    # Check substring matches (e.g., "sí, confirmo" contains "sí")
-    if any(kw in normalized for kw in CONFIRM_YES):
+    # Check word-boundary matches (e.g., "sí, confirmo" contains "sí" as a word)
+    # Se usa \b para no confundir "no" dentro de "noche", "uno", etc.
+    # ni "si" dentro de "servicio".
+    if any(re.search(r"\b" + re.escape(kw) + r"\b", normalized) for kw in CONFIRM_YES):
         return "yes"
-    if any(kw in normalized for kw in CONFIRM_NO):
+    if any(re.search(r"\b" + re.escape(kw) + r"\b", normalized) for kw in CONFIRM_NO):
         return "no"
 
     # Check for time patterns: "a las 10", "las 3", "10:00", "a las 10:30"
@@ -137,14 +139,32 @@ def extract_slot_from_text(
     def _apply_pm(h: int) -> int:
         return h + 12 if is_pm and 1 <= h <= 11 else h
 
-    # ── Prioridad 1: "10:30" ────────────────────────────────
-    times = re.findall(r"(\d{1,2}):(\d{2})", text)
-    if times:
-        h, m = _apply_pm(int(times[0][0])), int(times[0][1])
+    def _find_in_slots(h: int, m: int = 0) -> Optional[str]:
+        """
+        Busca el slot con hora h:m en available_slots.
+        Si no encuentra y h < 9 (antes del horario laboral), intenta h+12 (PM).
+        Esto resuelve "a las 4" → intenta T04 → no encontrado → intenta T16.
+        """
         candidate = f"T{h:02d}:{m:02d}"
         for slot in available_slots:
             if candidate in slot:
                 return slot
+        # Fallback PM: si la hora no tiene contexto y está fuera del horario (< 9)
+        if h < 9 and not is_pm:
+            h_pm = h + 12
+            candidate_pm = f"T{h_pm:02d}:{m:02d}"
+            for slot in available_slots:
+                if candidate_pm in slot:
+                    return slot
+        return None
+
+    # ── Prioridad 1: "10:30" ────────────────────────────────
+    times = re.findall(r"(\d{1,2}):(\d{2})", text)
+    if times:
+        h, m = _apply_pm(int(times[0][0])), int(times[0][1])
+        found = _find_in_slots(h, m)
+        if found:
+            return found
         if reference_date:
             return f"{reference_date}T{h:02d}:{m:02d}:00"
 
@@ -153,10 +173,9 @@ def extract_slot_from_text(
     if hour_matches:
         h = _apply_pm(int(hour_matches[0]))
         if 0 <= h <= 23:
-            candidate = f"T{h:02d}:00"
-            for slot in available_slots:
-                if candidate in slot:
-                    return slot
+            found = _find_in_slots(h)
+            if found:
+                return found
             if reference_date:
                 return f"{reference_date}T{h:02d}:00:00"
 
@@ -168,10 +187,9 @@ def extract_slot_from_text(
     if morning_matches:
         h = _apply_pm(int(morning_matches[0]))
         if 0 <= h <= 23:
-            candidate = f"T{h:02d}:00"
-            for slot in available_slots:
-                if candidate in slot:
-                    return slot
+            found = _find_in_slots(h)
+            if found:
+                return found
             if reference_date:
                 return f"{reference_date}T{h:02d}:00:00"
 

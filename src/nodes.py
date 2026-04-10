@@ -202,28 +202,47 @@ async def node_entry(
             updates["_history_len"] = len(history)
 
             # Restaurar campos persistentes desde el estado guardado.
-            # IMPORTANTE: Sobrescribir SIEMPRE los valores del estado previo
-            # (el state actual viene vacío/None por defecto en cada turno nuevo)
+            #
+            # Campos estables (siempre se restauran — son datos del perfil del paciente
+            # o del estado del flujo en curso):
+            #   patient_name, patient_phone → perfil del paciente, no cambia entre sesiones
+            #   awaiting_confirmation, confirmation_type → estado de flujo en progreso
+            #
+            # Campos transitorios (solo se restauran cuando hay un flujo en progreso,
+            # es decir, awaiting_confirmation=True). Si la sesión anterior terminó
+            # normalmente, estos campos pertenecen a una cita ya completada y NO deben
+            # contaminar la nueva conversación:
+            #   selected_service, service_duration, intent, datetime_preference,
+            #   appointment_id, google_event_id, available_slots, selected_slot
             prev_state = await store.get_agent_state(phone)
             if prev_state:
+                # Siempre restaurar — datos del perfil y estado de flujo
                 for f in [
                     "patient_name",
-                    "selected_service",
-                    "service_duration",
-                    "intent",
-                    "datetime_preference",
                     "patient_phone",
-                    "appointment_id",
-                    "google_event_id",
                     "awaiting_confirmation",
                     "confirmation_type",
-                    # available_slots se persiste para que detect_confirmation
-                    # pueda extraer el slot elegido en el turno siguiente
-                    "available_slots",
-                    "selected_slot",
                 ]:
                     if f in prev_state and prev_state[f] is not None:
                         updates[f] = prev_state[f]
+
+                # Solo restaurar si estamos en medio de un flujo (Turn 2+)
+                if prev_state.get("awaiting_confirmation"):
+                    for f in [
+                        "selected_service",
+                        "service_duration",
+                        "intent",
+                        "datetime_preference",
+                        "appointment_id",
+                        "google_event_id",
+                        "google_event_link",
+                        # available_slots se persiste para que detect_confirmation
+                        # pueda extraer el slot elegido en el turno siguiente
+                        "available_slots",
+                        "selected_slot",
+                    ]:
+                        if f in prev_state and prev_state[f] is not None:
+                            updates[f] = prev_state[f]
 
             # Fallback adicional para patient_name: intentar desde user_profiles
             # Cubre el caso donde agent_state no tiene patient_name (primer turno o
@@ -343,23 +362,56 @@ async def node_check_availability(
             duration_minutes=duration,
         )
 
-        # Normalizar a ISO strings para facilitar comparación y serialización
+        # Hora actual en Ecuador para filtrar slots ya pasados
+        now_ec = datetime.now(TIMEZONE)
+
+        # Normalizar a ISO strings para facilitar comparación y serialización,
+        # filtrando slots que ya pasaron (solo relevante cuando la fecha es hoy).
         slots_iso = []
         for s in slots:
             if isinstance(s, dict):
                 start = s.get("start")
                 if isinstance(start, datetime):
-                    slots_iso.append(start.isoformat())
+                    slot_iso = start.isoformat()
+                    slot_dt = start
                 else:
-                    slots_iso.append(str(start))
+                    slot_iso = str(start)
+                    try:
+                        slot_dt = datetime.fromisoformat(str(start))
+                    except ValueError:
+                        slot_dt = None
             else:
-                slots_iso.append(str(s))
+                slot_iso = str(s)
+                try:
+                    slot_dt = datetime.fromisoformat(str(s))
+                except ValueError:
+                    slot_dt = None
+
+            # Filtrar slots pasados: si el slot no tiene timezone, lo comparamos
+            # como naive (asumiendo Ecuador local). Si tiene timezone, comparamos aware.
+            if slot_dt is not None:
+                if slot_dt.tzinfo is not None:
+                    if slot_dt <= now_ec:
+                        continue  # slot ya pasó
+                else:
+                    if slot_dt <= now_ec.replace(tzinfo=None):
+                        continue  # slot ya pasó (naive comparison)
+
+            slots_iso.append(slot_iso)
 
         if not slots_iso:
             return {
                 "available_slots": [],
-                "last_error": "No hay slots disponibles para esa fecha. Intenta otra fecha.",
+                "last_error": "No hay slots disponibles para esa fecha. Por favor elija otra fecha u horario.",
             }
+
+        logger.info(
+            "node_check_availability: slots filtrados",
+            date=dt.date().isoformat(),
+            total_from_calendar=len(slots),
+            future_slots=len(slots_iso),
+            now_ec=now_ec.strftime("%H:%M"),
+        )
 
         return {
             "available_slots": slots_iso,
@@ -599,6 +651,10 @@ async def node_cancel_appointment(
         return {
             "current_step": "resolution",
             "confirmation_sent": True,
+            # Limpiar estado de flujo para no atrapar la sesión siguiente en
+            # awaiting_confirmation=True (lo que causa que todo mensaje vaya a detect_confirmation)
+            "awaiting_confirmation": False,
+            "confirmation_type": None,
             # Limpiar IDs para que el LLM no confunda con una reserva activa
             "appointment_id": None,
             "google_event_id": None,
@@ -767,23 +823,10 @@ async def node_check_existing_appointment(
                 seen_ids.add(eid)
                 patient_events.append(ev)
 
-        # ── Estrategia 3 (fallback para cancelar/reagendar): si hay eventos pero ninguno
-        # coincide por teléfono/nombre, asumir que el primero es del paciente.
-        # Esto cubre citas creadas manualmente (sin teléfono en descripción).
-        # SOLO aplica para cancelar/reagendar (riesgo bajo: el usuario llama porque SU cita).
-        # NO aplica para agendar (alto riesgo de falso positivo).
-        if not patient_events and intent in ("cancelar", "reagendar") and all_events:
-            logger.info(
-                "node_check_existing_appointment: sin match por teléfono/nombre "
-                "pero hay eventos — usando primer evento como fallback (intent: %s)",
-                intent,
-                phone=phone,
-                patient_name=patient_name,
-                total_events=len(all_events),
-            )
-            patient_events = all_events[:1]
-
         # ── Sin coincidencia real → NO hay cita ──────────────────────────────
+        # NOTA: El fallback que usaba all_events[:1] fue eliminado porque en una
+        # clínica con múltiples pacientes causaba cancelar/reagendar la cita de
+        # la persona EQUIVOCADA (el primer evento del calendario).
         if not patient_events:
             logger.info(
                 "node_check_existing_appointment: sin citas para el paciente",
@@ -1124,10 +1167,13 @@ async def node_reschedule_appointment(
             "google_event_link": new_event_link,
             "confirmation_sent": True,
             "current_step": "resolution",
-            # Limpiar estado de selección
+            # Limpiar estado de selección.
+            # IMPORTANTE: confirmation_type se mantiene como "reschedule" para que
+            # node_generate_response_with_tools identifique correctamente el mensaje de éxito
+            # ("Su cita ha sido reagendada" en vez de "agendada").
+            # Se limpiará en la siguiente sesión cuando awaiting_confirmation=False.
             "awaiting_confirmation": False,
             "available_slots": [],
-            "confirmation_type": None,
         }
 
     except Exception as e:
@@ -1356,6 +1402,7 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
         "confirmation_type": state.get("confirmation_type"),
         "awaiting_confirmation": state.get("awaiting_confirmation", False),
         "appointment_id": state.get("appointment_id"),
+        "google_event_id": state.get("google_event_id"),
         "google_event_link": state.get("google_event_link"),
         "selected_service": state.get("selected_service"),
         "datetime_preference": state.get("datetime_preference"),
@@ -1394,8 +1441,11 @@ def _format_datetime_readable(iso_str: str) -> str:
 
 def _format_slots(slots):
     """
-    Convierte slots (ISO strings o dicts) a formato legible para WhatsApp (HH:MM).
+    Convierte slots (ISO strings o dicts) a formato legible para WhatsApp.
+    Formato: "viernes 17:00, lunes 09:00" — incluye el día para evitar
+    que el LLM confunda slots de diferentes fechas o evalúe mal si ya pasaron.
     """
+    _DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
     formatted = []
 
     for slot in slots:
@@ -1415,7 +1465,8 @@ def _format_slots(slots):
         else:
             continue
 
-        formatted.append(dt.strftime("%H:%M"))
+        dia = _DIAS[dt.weekday()]
+        formatted.append(f"{dia} {dt.strftime('%H:%M')}")
 
     return ", ".join(formatted)
 
@@ -1440,6 +1491,18 @@ async def node_generate_response_with_tools(
     context_dict = _build_llm_context(state)
     context_parts = []
 
+    # CRÍTICO: siempre incluir la hora/fecha actual de Ecuador.
+    # El system prompt dice "usa SIEMPRE hora_actual_ecuador" pero sin este dato
+    # el LLM no puede evaluar si un slot ya pasó o si está en el futuro.
+    hora_ec = context_dict.get("hora_actual_ecuador")
+    fecha_ec = context_dict.get("fecha_hoy_ecuador")
+    dia_ec = context_dict.get("dia_semana")
+    if hora_ec:
+        context_parts.append(
+            f"Hora actual en Ecuador: {hora_ec} del {dia_ec} {fecha_ec}. "
+            "Slots PASADOS no deben ofrecerse."
+        )
+
     intent = context_dict.get("intent")
     if intent:
         context_parts.append(f"Intención del usuario: {intent}")
@@ -1462,10 +1525,27 @@ async def node_generate_response_with_tools(
     if datetime_pref:
         context_parts.append(f"Fecha/hora preferida: {datetime_pref}")
 
-    # ✅ slots disponibles
+    # ✅ slots disponibles — mostrar los 4 más cercanos a la hora solicitada
     slots = context_dict.get("available_slots", [])
     if slots:
-        readable = _format_slots(slots[:4])
+        preferred_slots = slots
+        if datetime_pref:
+            try:
+                pref_dt = datetime.fromisoformat(datetime_pref)
+                pref_time = pref_dt.hour * 60 + pref_dt.minute
+
+                def _slot_distance(s):
+                    try:
+                        dt = datetime.fromisoformat(s) if isinstance(s, str) else s
+                        t = dt.hour * 60 + dt.minute
+                        return abs(t - pref_time)
+                    except Exception:
+                        return 9999
+
+                preferred_slots = sorted(slots, key=_slot_distance)
+            except Exception:
+                pass
+        readable = _format_slots(preferred_slots[:4])
         context_parts.append(f"Slots disponibles: {readable}")
 
     selected_slot = context_dict.get("selected_slot")
@@ -1729,7 +1809,7 @@ async def node_execute_memory_tools(
             value = {
                 "content": content,
                 "context": context,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(tz=TIMEZONE).isoformat(),
             }
 
             await vector_store.aput(namespace, key=mem_id, value=value)
