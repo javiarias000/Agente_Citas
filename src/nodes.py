@@ -379,15 +379,41 @@ async def node_detect_confirmation(state: ArcadiumState) -> Dict[str, Any]:
     """
     Detecta si el usuario confirmó, rechazó, o eligió un slot.
     Sin LLM — regex y keywords.
+
+    Overrides contextuales:
+    - Cancelar: palabras de intención ("cancela", "cancelo", "anula") se interpretan
+      como "unknown" (no como "no"), para que generate_response pida confirmación
+      explícita. Sin esto, "cancela mi cita" devuelve "no" y el flujo se rompe.
+    - Reagendar sin available_slots: construye el ISO directamente desde la hora
+      parseada + la fecha de referencia del estado (mañana).
+    - Agendar: "a las N" y "N de la mañana/tarde" ya manejados por extract_slot_from_text.
     """
     from src.intent_router import detect_confirmation, extract_slot_from_text
 
     text = _last_human_text(state)
+    ctype = state.get("confirmation_type")
     result = detect_confirmation(text)
 
+    # ── Override para cancelar ───────────────────────────────────────────────
+    # "cancela mi cita" devuelve "no" porque "cancela" está en CONFIRM_NO.
+    # Pero en el flujo de cancelación, esas palabras expresan INTENCIÓN, no rechazo.
+    # → tratarlas como "unknown" para que generate_response pida confirmación explícita.
+    if ctype == "cancel" and result == "no":
+        intent_cancel_words = ["cancela", "cancelo", "anula", "anulo", "desagendar"]
+        text_lower = text.lower()
+        if any(kw in text_lower for kw in intent_cancel_words):
+            result = "unknown"
+
+    # ── Extracción de slot ───────────────────────────────────────────────────
     selected_slot = None
     if result == "slot_choice":
-        selected_slot = extract_slot_from_text(text, state.get("available_slots", []))
+        available_slots = state.get("available_slots", [])
+        # Para reagendar sin slots cargados: construir ISO desde fecha de referencia.
+        # El usuario incluyó la nueva hora en su primer mensaje ("a las 10 de la mañana").
+        reference_date = None
+        if not available_slots and ctype == "reschedule":
+            reference_date = state.get("manana_fecha") or state.get("fecha_hoy")
+        selected_slot = extract_slot_from_text(text, available_slots, reference_date)
 
     return {
         "confirmation_result": result,
@@ -808,6 +834,11 @@ async def node_check_existing_appointment(
             slots_available=slots_avail,
         )
 
+        # Para reagendar y cancelar: NO sobreescribir datetime_preference con el tiempo de
+        # la cita existente. El contexto del LLM usa existing_appointments[0].start para
+        # mostrar la fecha/hora de la cita vieja. Sobreescribir datetime_preference destruye
+        # información útil del mensaje del usuario (ej. "a las 10") antes de que
+        # detect_confirmation pueda extraerla.
         return {
             "calendar_lookup_done": True,
             "calendar_appointment_found": True,
@@ -815,10 +846,9 @@ async def node_check_existing_appointment(
             "calendar_total_for_patient": len(patient_events),
             "calendar_slots_available": slots_avail,
             "calendar_first_match": first_exact_match,
-            # Poblar con la primera cita del paciente (útil para cancel/reschedule)
+            # google_event_id es necesario para cancel/reschedule
             "google_event_id": first["event_id"],
             "google_event_link": first["html_link"],
-            "datetime_preference": first["start"],
         }
 
     except Exception as e:
@@ -1496,6 +1526,15 @@ async def node_generate_response_with_tools(
             "Informa al usuario sobre su(s) cita(s) existente(s) y pregunta si desea "
             "reagendar, cancelar o agregar una cita adicional."
         )
+    elif lookup_done and not cal_found and intent == "agendar":
+        # Verificación real en Calendar: NO hay citas previas para este usuario.
+        # CRÍTICO: evitar que el LLM alucine citas basándose en el historial de conversación.
+        context_parts.append(
+            "⚠️ INSTRUCCIÓN CRÍTICA: Se verificó Google Calendar en tiempo real y este usuario "
+            "NO tiene ninguna cita activa registrada. "
+            "PROHIBIDO decir 'ya tiene una cita' o frases similares. "
+            "Procede con el flujo normal para agendar una nueva cita."
+        )
 
     if confirmation_sent and ctype == "cancel":
         # Cancelación ejecutada exitosamente
@@ -1533,11 +1572,15 @@ async def node_generate_response_with_tools(
                 "a su nombre y ofrece agendar una nueva si lo desea."
             )
         else:
-            dt = context_dict.get("datetime_preference", "")
-            dt_info = f" del {dt}" if dt else ""
+            # Mostrar la cita existente desde existing_appointments (datetime_preference
+            # ya no se sobreescribe con el tiempo de la cita vieja para cancelar tampoco).
+            existing = context_dict.get("existing_appointments", [])
+            old_dt = existing[0].get("start", "") if existing else ""
+            old_dt_info = f" del {_format_datetime_readable(old_dt)}" if old_dt else ""
             context_parts.append(
-                f"El usuario quiere CANCELAR su cita de {svc}{dt_info}. "
-                "Pide confirmación explícita: '¿Confirma que desea cancelar su cita de {servicio}?'"
+                f"El usuario quiere CANCELAR su cita de {svc}{old_dt_info}. "
+                "Pide confirmación explícita con formato: "
+                f"'¿Confirma que desea cancelar su cita de {svc}{old_dt_info}?'"
             )
     elif ctype == "reschedule" and not confirmation_sent:
         # Esperando nueva fecha para reagendar
@@ -1551,11 +1594,15 @@ async def node_generate_response_with_tools(
                 "a su nombre y ofrece agendar una nueva si lo desea."
             )
         else:
-            dt = context_dict.get("datetime_preference", "")
-            dt_info = f" del {dt}" if dt else ""
+            # Mostrar la cita existente desde existing_appointments (datetime_preference
+            # ya no se sobreescribe con el tiempo de la cita vieja para reagendar).
+            existing = context_dict.get("existing_appointments", [])
+            old_dt = existing[0].get("start", "") if existing else ""
+            old_dt_info = f" del {_format_datetime_readable(old_dt)}" if old_dt else ""
             context_parts.append(
-                f"El usuario quiere REAGENDAR su cita de {svc}{dt_info}. "
-                "Pregunta por la nueva fecha y hora preferida."
+                f"El usuario quiere REAGENDAR su cita de {svc}{old_dt_info}. "
+                "Si ya indicó la nueva hora en este mensaje, procesa el reagendamiento directamente. "
+                "Si no, pregunta por la nueva fecha y hora preferida."
             )
 
     error = context_dict.get("last_error")

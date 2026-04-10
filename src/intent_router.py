@@ -117,18 +117,62 @@ def detect_confirmation(text: str) -> Literal["yes", "no", "slot_choice", "unkno
 def extract_slot_from_text(
     text: str,
     available_slots: List[str],
+    reference_date: Optional[str] = None,
 ) -> Optional[str]:
     """
     Extrae hora del texto y la busca en available_slots.
 
     available_slots = lista de ISO strings como "2026-04-10T10:00:00"
-    Retorna el primer slot match, o None.
+    reference_date  = fecha ISO "2026-04-11" para construir el slot cuando
+                      available_slots está vacío (flujo reagendar).
+
+    Prioridad 1: formato "10:30" (con colon)
+    Prioridad 2: formato "a las 10" / "las 10" (sin colon)
+    Si available_slots está vacío y reference_date está dado, construye
+    el ISO directamente sin necesidad de matchear contra una lista.
     """
+    text_lower = text.lower()
+    is_pm = any(w in text_lower for w in ("tarde", "noche", "pm"))
+
+    def _apply_pm(h: int) -> int:
+        return h + 12 if is_pm and 1 <= h <= 11 else h
+
+    # ── Prioridad 1: "10:30" ────────────────────────────────
     times = re.findall(r"(\d{1,2}):(\d{2})", text)
     if times:
-        h, m = int(times[0][0]), int(times[0][1])
+        h, m = _apply_pm(int(times[0][0])), int(times[0][1])
         candidate = f"T{h:02d}:{m:02d}"
         for slot in available_slots:
             if candidate in slot:
                 return slot
+        if reference_date:
+            return f"{reference_date}T{h:02d}:{m:02d}:00"
+
+    # ── Prioridad 2: "a las 10" / "las 10" ─────────────────
+    hour_matches = re.findall(r"(?:a las|las)\s+(\d{1,2})", text_lower)
+    if hour_matches:
+        h = _apply_pm(int(hour_matches[0]))
+        if 0 <= h <= 23:
+            candidate = f"T{h:02d}:00"
+            for slot in available_slots:
+                if candidate in slot:
+                    return slot
+            if reference_date:
+                return f"{reference_date}T{h:02d}:00:00"
+
+    # ── Prioridad 3: "10 de la mañana" / "10 de la tarde" ──
+    # Cubre el caso donde el usuario dice la hora ANTES de "de la mañana/tarde/noche"
+    morning_matches = re.findall(
+        r"(\d{1,2})\s+de\s+la\s+(?:mañana|manana|tarde|noche)", text_lower
+    )
+    if morning_matches:
+        h = _apply_pm(int(morning_matches[0]))
+        if 0 <= h <= 23:
+            candidate = f"T{h:02d}:00"
+            for slot in available_slots:
+                if candidate in slot:
+                    return slot
+            if reference_date:
+                return f"{reference_date}T{h:02d}:00:00"
+
     return None
