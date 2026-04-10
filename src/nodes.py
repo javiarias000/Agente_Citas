@@ -225,6 +225,22 @@ async def node_entry(
                     if f in prev_state and prev_state[f] is not None:
                         updates[f] = prev_state[f]
 
+            # Fallback adicional para patient_name: intentar desde user_profiles
+            # Cubre el caso donde agent_state no tiene patient_name (primer turno o
+            # después de una sesión sin appointment) pero el perfil sí lo tiene.
+            if not updates.get("patient_name"):
+                try:
+                    profile = await store.get_user_profile(phone)
+                    if profile and profile.get("patient_name"):
+                        updates["patient_name"] = profile["patient_name"]
+                        logger.info(
+                            "node_entry: patient_name restaurado desde user_profile",
+                            phone=phone,
+                            patient_name=profile["patient_name"],
+                        )
+                except Exception:
+                    pass
+
         except Exception as e:
             logger.warning("no se pudo cargar estado previo", error=str(e))
             # Fallback seguro: al menos incluir el mensaje nuevo.
@@ -725,8 +741,23 @@ async def node_check_existing_appointment(
                 seen_ids.add(eid)
                 patient_events.append(ev)
 
-        # ── Sin coincidencia real → NO hay cita (sin fallback) ───────────────
-        # Cero uso de eventos "ambient" del calendario para evitar falsos positivos.
+        # ── Estrategia 3 (fallback para cancelar/reagendar): si hay eventos pero ninguno
+        # coincide por teléfono/nombre, asumir que el primero es del paciente.
+        # Esto cubre citas creadas manualmente (sin teléfono en descripción).
+        # SOLO aplica para cancelar/reagendar (riesgo bajo: el usuario llama porque SU cita).
+        # NO aplica para agendar (alto riesgo de falso positivo).
+        if not patient_events and intent in ("cancelar", "reagendar") and all_events:
+            logger.info(
+                "node_check_existing_appointment: sin match por teléfono/nombre "
+                "pero hay eventos — usando primer evento como fallback (intent: %s)",
+                intent,
+                phone=phone,
+                patient_name=patient_name,
+                total_events=len(all_events),
+            )
+            patient_events = all_events[:1]
+
+        # ── Sin coincidencia real → NO hay cita ──────────────────────────────
         if not patient_events:
             logger.info(
                 "node_check_existing_appointment: sin citas para el paciente",
@@ -1422,15 +1453,33 @@ async def node_generate_response_with_tools(
     existing_appts = context_dict.get("existing_appointments", [])
     awaiting = context_dict.get("awaiting_confirmation", False)
 
-    # ── GUARDIA CRÍTICA: prevenir que el LLM confirme antes de que booking_node ejecute ──
-    # Si estamos esperando confirmación del usuario (slots mostrados, sin booking aún),
-    # instrucción explícita de NO confirmar la cita.
+    # ── GUARDIAS CRÍTICAS: prevenir confirmaciones falsas ──────────────────
+    # Regla global: si confirmation_sent=False, NINGUNA operación fue ejecutada.
+
+    # 1. Agendar en progreso (slots mostrados, esperando selección del usuario)
     if awaiting and ctype == "book" and not confirmation_sent and not google_event_id:
         context_parts.append(
             "⚠️ INSTRUCCIÓN CRÍTICA: La cita AÚN NO ha sido creada en el sistema. "
             "Muestra los horarios disponibles y pide al usuario que confirme cuál prefiere. "
             "PROHIBIDO decir 'Su cita ha sido agendada' o frases similares hasta que el sistema lo confirme."
         )
+
+    # 2. Reagendar/cancelar sin operación ejecutada — basado en INTENT (ignora ctype stale)
+    # Esto cubre el caso donde ctype="book" de un turno anterior pero intent ya es reagendar/cancelar.
+    if intent in ("reagendar", "cancelar") and not confirmation_sent:
+        if lookup_done and not cal_found:
+            context_parts.append(
+                "⚠️ INSTRUCCIÓN CRÍTICA: Se verificó Google Calendar y NO existe ninguna cita activa "
+                "para este usuario en el sistema. "
+                "PROHIBIDO confirmar reagendamiento o cancelación. "
+                "Informa que no hay cita activa y ofrece agendar una nueva si lo desea."
+            )
+        else:
+            context_parts.append(
+                "⚠️ INSTRUCCIÓN CRÍTICA: La operación de reagendamiento/cancelación AÚN NO se ha ejecutado. "
+                "PROHIBIDO decir 'Su cita ha sido reagendada' o 'Su cita ha sido cancelada'. "
+                "Solo usa esas frases cuando el sistema confirme explícitamente que la operación fue exitosa."
+            )
 
     # ── Forcing tool: resultado de verificación en Calendar ──────────────
     if lookup_done and cal_found and existing_appts and intent == "agendar":
