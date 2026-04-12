@@ -474,7 +474,88 @@ class ArcadiumAPI:
 
         # ── Endpoints de información ──────────────────
 
+        @app.post("/api/agent/review")
+        async def agent_review(request: Request):
+            """
+            Endpoint para aprobar/editar/rechazar acciones del agente.
+            Payload: { "session_id": "...", "decisions": [{"type": "approve"}] }
+            """
+            try:
+                data = await request.json()
+                session_id = data.get("session_id")
+                decisions = data.get("decisions")
+
+                if not session_id or not decisions:
+                    raise HTTPException(status_code=400, detail="Missing session_id or decisions")
+
+                # Recuperar agente del cache
+                # El session_id en el cache puede tener el prefijo 'deyy_' o no dependiendo de cómo se guardó
+                cache_key = session_id
+                if cache_key not in self._agents:
+                    # Intentar buscar con prefijo si es un teléfono
+                    alt_key = f"deyy_{session_id}" if not session_id.startswith("deyy_") else session_id
+                    if alt_key in self._agents:
+                        cache_key = alt_key
+                    else:
+                        # Si no está en cache, intentar recrearlo (aunque perderíamos estado si no es persistente)
+                        # Pero LangGraph usa checkpointer, así que podemos recrear el agente y el grafo cargará el estado.
+                        logger.info("Agente no en cache, recreando...", session_id=session_id)
+                        agent = await self._get_or_create_agent(session_id=session_id)
+                        self._agents[cache_key] = agent
+                else:
+                    agent = self._agents.get(cache_key)
+
+                if not agent:
+                    raise HTTPException(status_code=404, detail="Agent not found in cache")
+
+                from langgraph.types import Command
+
+                # Configuración del thread para LangGraph
+                config = {"configurable": {"thread_id": agent.session_id}}
+
+                # Ejecutar el grafo resumiendo desde la interrupción
+                result = await agent.graph.ainvoke(
+                    Command(resume={"decisions": decisions}),
+                    config=config
+                )
+
+                # Normalizar resultado
+                from core.orchestrator import _normalize_agent_result
+                final_result = _normalize_agent_result(result)
+
+                # Enviar respuesta al usuario (WhatsApp/Chatwoot)
+                # Necesitamos saber la plataforma. Buscamos la conversación en DB.
+                async with self.db.get_session() as session:
+                    from db.models import Conversation
+                    from sqlalchemy import select
+                    stmt = select(Conversation).where(Conversation.phone_number == session_id.replace("deyy_", ""))
+                    conv = (await session.execute(stmt)).scalar_one_or_none()
+
+                    if conv and conv.platform == "whatsapp":
+                        await self.whatsapp_service.send_message(
+                            WhatsAppMessage(to=conv.phone_number, text=final_result["response"])
+                        )
+                    elif conv and conv.platform == "chatwoot":
+                        # Lógica simplificada de Chatwoot
+                        chatwoot_msg = ChatwootMessage(
+                            conversation_id=conv.meta_data.get("chatwoot_conversation_id"),
+                            content=final_result["response"],
+                            message_type="outgoing",
+                            sender_type="agent",
+                        )
+                        await self.chatwoot_service.send_message(chatwoot_msg)
+
+                return {
+                    "status": "success",
+                    "response": final_result["response"]
+                }
+
+            except Exception as e:
+                logger.error("Error en agent_review", error=str(e), exc_info=True)
+                raise HTTPException(status_code=500, detail=str(e))
+
         @app.get("/")
+
         async def root():
             return {
                 "name": self.settings.APP_NAME,
@@ -1126,19 +1207,25 @@ class ArcadiumAPI:
                     project_id=project_id,
                 )
             elif self.settings.ENABLE_STATE_MACHINE:
-                
-                from agents.router_agent import RouterAgent
+                # RouterAgent was removed/merged into DeyyAgent in v2.1
+                # Fallback to DeyyAgent as it now handles the State Machine logic
+                from agents.deyy_agent import DeyyAgent
 
-                agent = RouterAgent(
+                agent = DeyyAgent(
                     session_id=session_id,
                     store=self.store,
                     project_id=project_id,
                     project_config=project_config,
                     whatsapp_service=self.whatsapp_service,
+                    system_prompt=self.settings.AGENT_SYSTEM_PROMPT,
+                    llm_model=self.settings.OPENAI_MODEL,
+                    llm_temperature=self.settings.OPENAI_TEMPERATURE,
+                    max_iterations=self.settings.AGENT_MAX_ITERATIONS,
                     verbose=self.settings.AGENT_VERBOSE,
                 )
             else:
                 from agents.deyy_agent import DeyyAgent
+
 
                 agent = DeyyAgent(
                     session_id=session_id,

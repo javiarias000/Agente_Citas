@@ -178,7 +178,16 @@ class ArcadiumAgent:
                 state,
                 config=config
             )
-            
+
+            # Check if graph is interrupted (pending human review)
+            if hasattr(result, "interrupts") and result.interrupts:
+                logger.info("Grafo interrumpido para revisión humana", session_id=self.session_id)
+                return AgentResponse(
+                    text="SISTEMA: Acción pendiente de aprobación humana.",
+                    status="pending_approval",
+                    intent=state.get("intent"),
+                )
+
         except Exception as e:
             logger.error("Error invocando grafo", error=str(e), exc_info=True)
             return AgentResponse(

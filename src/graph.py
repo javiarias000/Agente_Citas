@@ -39,6 +39,8 @@ def build_graph(
         edge_after_confirm,
         edge_after_extract_data,
         edge_after_route_intent,
+        edge_after_check_availability,
+        edge_after_reschedule_appointment,
     )
 
     # Importar nodos y edges
@@ -210,8 +212,15 @@ def build_graph(
         },
     )
 
-    # check_availability → generate_response (mostrar slots)
-    graph.add_edge("check_availability", "generate_response")
+    # check_availability → routing (Auto-Booking o generar respuesta)
+    graph.add_conditional_edges(
+        "check_availability",
+        edge_after_check_availability,
+        {
+            "book_appointment": "book_appointment",
+            "generate_response": "generate_response",
+        },
+    )
 
     # generate_response → routing condicional (execute_memory_tools o save_state)
     # luego de execute_memory_tools, vuelve a generate_response para segunda ronda
@@ -249,8 +258,14 @@ def build_graph(
     # cancel_appointment → generate_response (confirmación de cancelación)
     graph.add_edge("cancel_appointment", "generate_response")
 
-    # reschedule_appointment → generate_response (confirmación de reagendamiento)
-    graph.add_edge("reschedule_appointment", "generate_response")
+    # reschedule_appointment → routing condicional (si falló por falta de slot, pedirlo)
+    graph.add_conditional_edges(
+        "reschedule_appointment",
+        edge_after_reschedule_appointment,
+        {
+            "generate_response": "generate_response",
+        },
+    )
 
     # ── Escalation check (opcional) ──────────────────────────
     # No se agrega como conditional edge en el graph principal
@@ -284,7 +299,15 @@ def compile_graph(
     )
 
     if checkpointer:
-        compiled = graph.compile(checkpointer=checkpointer)
+        compiled = graph.compile(
+            checkpointer=checkpointer,
+            interrupt_before=[
+                "execute_memory_tools",
+                "book_appointment",
+                "cancel_appointment",
+                "reschedule_appointment",
+            ],
+        )
     else:
         compiled = graph.compile()
 
