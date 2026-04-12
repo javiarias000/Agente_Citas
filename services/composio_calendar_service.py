@@ -356,13 +356,46 @@ class ComposioCalendarService:
             },
         )
 
-        # Extraer períodos ocupados del calendario
-        cal_data = (data.get("calendars") or {}).get(self.calendar_id, {})
-        if not cal_data:
-            # Intenta con 'primary' como fallback
-            cal_data = (data.get("calendars") or {}).get("primary", {})
+        # Log raw response para diagnóstico de mismatch de calendar_id
+        calendars_raw = data.get("calendars") or {}
+        logger.info(
+            "FIND_FREE_SLOTS raw calendar keys",
+            keys=list(calendars_raw.keys()),
+            calendar_id=self.calendar_id,
+        )
+
+        # Extraer períodos ocupados — buscar en todas las keys conocidas
+        cal_data = (
+            calendars_raw.get(self.calendar_id)
+            or calendars_raw.get("primary")
+            or (next(iter(calendars_raw.values()), None) if len(calendars_raw) == 1 else None)
+            or {}
+        )
 
         busy_periods = cal_data.get("busy", [])
+
+        # Fallback: si FIND_FREE_SLOTS devuelve 0 busy periods, verificar con list_events
+        # para detectar citas que el freebusy API podría estar omitiendo.
+        if not busy_periods:
+            try:
+                day_start_dt = datetime.combine(date_only, time(start_hour, 0), tzinfo=self._local_tz)
+                day_end_dt = datetime.combine(date_only, time(end_hour, 0), tzinfo=self._local_tz)
+                events = await self.list_events(day_start_dt, day_end_dt, max_results=50)
+                if events:
+                    logger.info(
+                        "FIND_FREE_SLOTS devolvió 0 busy — usando list_events como fallback",
+                        events_found=len(events),
+                    )
+                    for ev in events:
+                        # Google API anida: {"start": {"dateTime": "..."}} o {"start": {"date": "..."}}
+                        s = ev.get("start") or {}
+                        e = ev.get("end") or {}
+                        ev_start = s.get("dateTime") or s.get("date") or (s if isinstance(s, str) else "")
+                        ev_end = e.get("dateTime") or e.get("date") or (e if isinstance(e, str) else "")
+                        if ev_start and ev_end:
+                            busy_periods.append({"start": ev_start, "end": ev_end})
+            except Exception as e:
+                logger.warning("Fallback list_events falló", error=str(e))
 
         # Construir conjuntos de slots ocupados
         busy_slots: set = set()

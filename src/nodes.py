@@ -1451,7 +1451,9 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
             "hora_ecuador": state.get("hora_actual"),
             "fecha_ecuador": state.get("fecha_hoy"),
             "dia_semana": state.get("dia_semana_hoy")
-        }
+        },
+        "last_error": state.get("last_error"),
+        "should_escalate": state.get("should_escalate", False),
     }
 
 
@@ -1777,7 +1779,10 @@ async def node_generate_response_with_tools(
             )
 
     # ── Forcing tool: resultado de verificación en Calendar ──────────────
-    if lookup_done and cal_found and existing_appts and intent == "agendar":
+    # IMPORTANTE: Solo aplica si el booking NO ha sido ejecutado aún.
+    # Si confirmation_sent + google_event_id → la cita ya fue creada, estas guards no aplican.
+    booking_done = bool(google_event_id and confirmation_sent)
+    if not booking_done and lookup_done and cal_found and existing_appts and intent == "agendar":
         # Usuario quiere agendar pero YA TIENE cita(s)
         lines = []
         for appt in existing_appts[:2]:
@@ -1791,7 +1796,7 @@ async def node_generate_response_with_tools(
             "Informa al usuario sobre su(s) cita(s) existente(s) y pregunta si desea "
             "reagendar, cancelar o agregar una cita adicional."
         )
-    elif lookup_done and not cal_found and intent == "agendar":
+    elif not booking_done and lookup_done and not cal_found and intent == "agendar":
         # Verificación real en Calendar: NO hay citas previas para este usuario.
         # CRÍTICO: evitar que el LLM alucine citas basándose en el historial de conversación o memoria semántica.
         context_parts.append(
@@ -1903,12 +1908,16 @@ async def node_generate_response_with_tools(
     # Obligamos al LLM a seguir un proceso estructurado antes de responder.
     context_parts.append(
         "INSTRUCCIÓN DE PROCESAMIENTO (Sigue estos pasos estrictamente):\n"
-        "PASO 1 - REVISIÓN DE HISTORIAL: Lee los mensajes anteriores. ¿Qué pidió el cliente? ¿Qué datos ya dio?\n"
-        "PASO 2 - RAZONAMIENTO (Think): Compara la petición del usuario con la VERDAD ABSOLUTA del sistema (JSON). "
-        "¿La herramienta de calendario confirmó la operación? Si confirmation_sent es False, la cita NO existe.\n"
-        "PASO 3 - VALIDACIÓN DE SALIDA: Si el usuario pidió agendar/reagendar y no hay un google_event_id confirmado, "
+        "PASO 1 - CONTEXTO DEL SISTEMA (PRIORIDAD MÁXIMA): El JSON estructurado de arriba es la ÚNICA FUENTE DE VERDAD. "
+        "Ignora cualquier dato del historial de conversación que contradiga el JSON del sistema. "
+        "Los mensajes anteriores del asistente son solo referencia — NUNCA son más confiables que el JSON actual.\n"
+        "PASO 2 - REVISIÓN DE HISTORIAL: Lee los mensajes anteriores SOLO para entender qué pidió el cliente "
+        "en este turno. Si el historial contradice el JSON del sistema, el JSON SIEMPRE gana.\n"
+        "PASO 3 - RAZONAMIENTO (Think): ¿confirmation_sent es True? → la operación SÍ se ejecutó. "
+        "¿google_event_id existe? → el evento SÍ está en Google Calendar. No importa qué diga el historial.\n"
+        "PASO 4 - VALIDACIÓN DE SALIDA: Si el usuario pidió agendar/reagendar y no hay un google_event_id confirmado, "
         "está PROHIBIDO decir que la cita fue creada. Pide la info faltante o informa que estás procesando.\n"
-        "PASO 4 - RESPUESTA: Responde de forma amable, corta (máx 3-4 líneas) y basada solo en la verdad del sistema."
+        "PASO 5 - RESPUESTA: Responde de forma amable, corta (máx 3-4 líneas) y basada solo en la verdad del sistema."
     )
 
     context_str = (
@@ -1918,10 +1927,48 @@ async def node_generate_response_with_tools(
     system_prompt = _GENERATE_RESPONSE_SYSTEM_WITH_TOOLS.format(context=context_str)
 
     # ✅ mensajes LLM
-    from langchain_core.messages import SystemMessage
+    from langchain_core.messages import SystemMessage, AIMessage, ToolMessage
 
-    history = state.get("messages", [])
-    lm_messages = [SystemMessage(content=system_prompt)] + list(history)
+    history = list(state.get("messages", []))
+    # Limitar historial para evitar que mensajes rancios de sesiones anteriores
+    # contaminen la respuesta. El JSON del sistema es la única fuente de verdad.
+    MAX_HISTORY_MESSAGES = 10
+    if len(history) > MAX_HISTORY_MESSAGES:
+        history = history[-MAX_HISTORY_MESSAGES:]
+
+    # Sanear historial: OpenAI rechaza (400) si un AIMessage con tool_calls
+    # no está seguido por ToolMessages con cada tool_call_id.
+    # Eliminamos los AIMessages con tool_calls huérfanos (sin respuesta).
+    sanitized = []
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            # Recolectar IDs esperados
+            expected_ids = {tc["id"] for tc in msg.tool_calls}
+            # Ver si los siguientes mensajes responden todos los tool_calls
+            j = i + 1
+            found_ids = set()
+            while j < len(history) and isinstance(history[j], ToolMessage):
+                found_ids.add(history[j].tool_call_id)
+                j += 1
+            if expected_ids <= found_ids:
+                # Completo: incluir AIMessage + sus ToolMessages
+                sanitized.extend(history[i:j])
+                i = j
+            else:
+                # Incompleto: descartar este AIMessage (y sus ToolMessages parciales si los hay)
+                logger.warning(
+                    "generate_response: descartando AIMessage con tool_calls huérfanos",
+                    expected=list(expected_ids),
+                    found=list(found_ids),
+                )
+                i = j  # saltar también los ToolMessages parciales
+        else:
+            sanitized.append(msg)
+            i += 1
+
+    lm_messages = [SystemMessage(content=system_prompt)] + sanitized
 
     # ✅ tool binding
     bound_tool = None

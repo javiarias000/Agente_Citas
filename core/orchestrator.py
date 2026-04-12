@@ -287,12 +287,20 @@ class ArcadiumAPI:
                 logger.warning("No se pudo instanciar AppointmentService, db_service=None", error=str(e))
                 _db_service = None
 
+            # Envolver ComposioCalendarService en el adapter que los nodos esperan
+            raw_cal = getattr(self, "_calendar_service", None)
+            if raw_cal is not None:
+                from src.calendar_service import GoogleCalendarService as CalendarAdapter
+                wrapped_calendar = CalendarAdapter(calendar_service=raw_cal, db_service=_db_service)
+            else:
+                wrapped_calendar = None
+
             # compilar grafo
             self.langgraph_graph = compile_graph(
                 llm=self.langgraph_llm,
                 store=self.state_store,
                 vector_store=self.vector_store,
-                calendar_service=getattr(self, "_calendar_service", None),
+                calendar_service=wrapped_calendar,
                 db_service=_db_service,
                 checkpointer=self.checkpointer,
             )
