@@ -218,6 +218,7 @@ class ArcadiumAPI:
 
             from memory_agent_integration.memory_agent_backend import MemoryAgentBackend
             from src.graph import compile_graph
+            from src.graph_v2 import compile_graph_v2
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver as PostgresSaver
             from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -295,15 +296,26 @@ class ArcadiumAPI:
             else:
                 wrapped_calendar = None
 
-            # compilar grafo
-            self.langgraph_graph = compile_graph(
-                llm=self.langgraph_llm,
-                store=self.state_store,
-                vector_store=self.vector_store,
-                calendar_service=wrapped_calendar,
-                db_service=_db_service,
-                checkpointer=self.checkpointer,
-            )
+            # compilar grafo (V2 = ReAct 5 nodos; V1 = state machine 20+ nodos)
+            if self.settings.USE_GRAPH_V2:
+                self.langgraph_graph = compile_graph_v2(
+                    llm=self.langgraph_llm,
+                    store=self.state_store,
+                    calendar_service=wrapped_calendar,
+                    db_service=_db_service,
+                    checkpointer=self.checkpointer,
+                )
+                logger.info("Usando Graph V2 (ReAct, 5 nodos)")
+            else:
+                self.langgraph_graph = compile_graph(
+                    llm=self.langgraph_llm,
+                    store=self.state_store,
+                    vector_store=self.vector_store,
+                    calendar_service=wrapped_calendar,
+                    db_service=_db_service,
+                    checkpointer=self.checkpointer,
+                )
+                logger.info("Usando Graph V1 (state machine, 20+ nodos)")
 
             logger.info(
                 "LangGraph components inicializados",

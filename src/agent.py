@@ -89,19 +89,17 @@ class ArcadiumAgent:
 
     async def process_message(self, message: str) -> AgentResponse:
         """
-        Procesa un mensaje de WhatsApp a través del grafo.
+        Procesa un mensaje de WhatsApp a través del grafo (V1 o V2).
 
-        Flujo:
+        Flujo V2 (ReAct):
         1. Normaliza teléfono
-        2. Construye estado inicial SOLO con el mensaje nuevo (_incoming_message)
-        3. Restaura campos persistentes del estado previo (sin historial de mensajes)
-        4. Invoca el grafo — node_entry es el responsable de cargar el historial
-        5. Extrae la respuesta y retorna AgentResponse
+        2. Construye estado inicial SOLO con el mensaje nuevo
+        3. Enriquece con contexto del paciente (memorias)
+        4. Invoca el grafo — entry_v2 carga historial, react_loop decide todo
+        5. Extrae _final_response del estado final
 
-        FIX: Ya NO se carga historial aquí. Hacerlo causaba que node_entry
-        recibiera state["messages"] con datos, entrara al bloque
-        `if history and not state.get("messages")` como False, y nunca
-        mergeara el historial → el agente olvidaba la conversación.
+        Flujo V1 (legacy):
+        1-4. Igual, pero node_entry carga historial y 20+ nodos rutean.
         """
         await self.initialize()
 
@@ -199,13 +197,21 @@ class ArcadiumAgent:
         return self._extract_response(result)
 
     def _extract_response(self, state: Dict[str, Any]) -> AgentResponse:
-        """Extrae AgentResponse del estado final del grafo."""
-        messages = state.get("messages", [])
-        text = ""
-        for msg in reversed(messages):
-            if getattr(msg, "type", None) == "ai":
-                text = msg.content
-                break
+        """Extrae AgentResponse del estado final del grafo.
+
+        V2: usa _final_response (seteado por node_format_response).
+        V1: busca último AIMessage en messages.
+        """
+        # V2: _final_response es la fuente canónica
+        text = state.get("_final_response", "")
+
+        if not text:
+            # V1 fallback: buscar último AIMessage
+            messages = state.get("messages", [])
+            for msg in reversed(messages):
+                if getattr(msg, "type", None) == "ai" and getattr(msg, "content", ""):
+                    text = msg.content
+                    break
 
         if not text:
             text = "Lo siento, no pude procesar su mensaje. 📞"

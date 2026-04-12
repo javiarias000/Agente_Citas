@@ -133,6 +133,11 @@ class Settings(BaseSettings):
         description="Usar ArcadiumAgent (LangGraph) en lugar de DeyyAgent/RouterAgent. "
                     "Feature flag para migración sin downtime."
     )
+    USE_GRAPH_V2: bool = Field(
+        default=False,
+        description="Usar grafo V2 (ReAct, 5 nodos, 1 LLM call/turno) en lugar del V1 (20+ nodos). "
+                    "Requiere USE_LANGGRAPH=True."
+    )
     LANGGRAPH_MODEL: str = Field(
         default="gpt-4o-mini",
         description="Modelo LLM para agentes LangGraph"
