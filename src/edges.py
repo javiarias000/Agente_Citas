@@ -7,15 +7,41 @@ NUNCA llaman al LLM. NUNCA mutan el estado.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, Literal
 
+import structlog
 from src.state import get_missing_fields
 
+logger = structlog.get_logger("langgraph.edges")
+
+def edge_after_check_availability(state: Dict[str, Any]) -> str:
+    """
+    Después de consultar disponibilidad.
+    Si hay un match exacto con la preferencia del usuario y tenemos los datos,
+    intentamos agendar directamente.
+    CRÍTICO: Si el intent es 'agendar', no permitimos pasar a generate_response
+    si el slot solicitado está libre; debemos forzar el booking.
+    """
+    from utils.date_utils import compare_slots
+
+    available_slots = state.get("available_slots", [])
+    datetime_pref = state.get("datetime_preference")
+    missing = state.get("missing_fields", [])
+    intent = state.get("intent", "")
+
+    if datetime_pref and available_slots and not missing:
+        for s in available_slots:
+            if compare_slots(datetime_pref, s):
+                logger.info("EDGE_MATCH: Match exacto detectado via utils.date_utils. Forzando booking.", pref=datetime_pref, slot=s)
+                return "book_appointment"
+
+    # Si el intent es agendar y el usuario fue específico, pero no hubo match exacto,
+    # vamos a generate_response para que el LLM ofrezca los slots disponibles.
+    return "generate_response"
 
 def edge_after_route_intent(state: Dict[str, Any]) -> str:
     """
-    Después de route_intent, decide a dónde ir.
-
     PRIORIDAD MÁXIMA: si estamos esperando selección/confirmación de un slot
     (awaiting_confirmation=True), el mensaje del usuario debe ir a detect_confirmation
     independientemente de su intent. Esto evita el bug donde el Turn 2 ("a las 10:00")
@@ -47,11 +73,12 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
     if awaiting and ctype in ("cancel", "reschedule"):
         return "detect_confirmation"
 
-    # GUARDIA DE SEGURIDAD: si hay slots disponibles en el estado (de un turno previo)
-    # y el usuario no está cancelando/reagendando explícitamente, tratarlo como
-    # confirmación. Esto cubre el caso donde awaiting_confirmation no se restauró
-    # correctamente pero los slots sí están en el estado.
-    if state.get("available_slots") and intent not in ("cancelar", "reagendar"):
+    # GUARDIA DE SEGURIDAD: si hay slots disponibles Y awaiting_confirmation=True
+    # (de un turno previo), tratar el mensaje como confirmación/selección.
+    # FIX: requiere awaiting_confirmation=True — sin esta condición, slots rancios
+    # de sesiones anteriores atrapaban nuevas conversaciones enviándolas a detect_confirmation
+    # aunque el usuario estuviera iniciando un flujo completamente diferente.
+    if state.get("available_slots") and state.get("awaiting_confirmation") and intent not in ("cancelar", "reagendar"):
         return "detect_confirmation"
 
     if not intent:
@@ -59,9 +86,11 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
 
     # Forcing tool: verificar Calendar antes de operar sobre citas
     if intent in ("agendar", "cancelar", "reagendar"):
+        # PRIORIDAD: Primero check_existing para saber el estado actual del paciente
         return "check_existing_appointment"
 
     if intent == "consultar":
+        # Si es consulta general de disponibilidad, vamos directo
         return "check_availability"
 
     return "generate_response"  # "otro" o no reconocido
@@ -208,3 +237,16 @@ def edge_should_escalate(state: Dict[str, Any]) -> Literal["escalate_to_human", 
         return "escalate_to_human"
 
     return "continue"
+
+def edge_after_reschedule_appointment(state: Dict[str, Any]) -> str:
+    """
+    Después de node_reschedule_appointment.
+    Si hubo un error (ej. falta el nuevo slot), vamos a generate_response
+    para que el LLM pida la información faltante.
+    Si fue exitoso, vamos a generate_response para confirmar el éxito.
+    """
+    last_error = state.get("last_error")
+    if last_error and "No hay nuevo slot" in last_error:
+        return "generate_response"
+
+    return "generate_response"

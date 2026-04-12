@@ -192,14 +192,15 @@ async def node_entry(
         try:
             phone = state.get("phone_number", "")
 
-            # FIX: SIEMPRE cargar historial del store y añadir el mensaje nuevo.
-            # No condicionarlo a si state["messages"] está vacío o no.
-            history = await store.get_history(phone, limit=50)
+            # FIX: Cargar un historial corto (10 msgs) para evitar que el LLM
+            # alucine con citas de conversaciones muy antiguas.
+            history = await store.get_history(phone, limit=10)
             logger.info("node_entry: historial cargado", phone=phone, history_len=len(history))
             updates["messages"] = list(history) + [new_message]
             # Registrar cuántos mensajes existían antes de este turno.
             # node_save_state usará este valor para guardar SOLO los mensajes nuevos.
             updates["_history_len"] = len(history)
+
 
             # Restaurar campos persistentes desde el estado guardado.
             #
@@ -228,21 +229,28 @@ async def node_entry(
 
                 # Solo restaurar si estamos en medio de un flujo (Turn 2+)
                 if prev_state.get("awaiting_confirmation"):
+                    # Si el usuario está iniciando un nuevo flujo de agendamiento,
+                    # limpiamos IDs de citas viejas para evitar que el LLM alucine.
                     for f in [
                         "selected_service",
                         "service_duration",
                         "intent",
                         "datetime_preference",
-                        "appointment_id",
-                        "google_event_id",
                         "google_event_link",
-                        # available_slots se persiste para que detect_confirmation
-                        # pueda extraer el slot elegido en el turno siguiente
                         "available_slots",
                         "selected_slot",
                     ]:
                         if f in prev_state and prev_state[f] is not None:
                             updates[f] = prev_state[f]
+
+                    # Estos campos SOLO se restauran si NO estamos en un flujo de "agendar" nuevo
+                    # o si realmente necesitamos la cita anterior para cancelar/reagendar.
+                    # Por seguridad, los manejamos con cautela.
+                    for f in ["appointment_id", "google_event_id"]:
+                        if f in prev_state and prev_state[f] is not None:
+                            # Solo restaurar si no parece ser un flujo de agendamiento limpio
+                            updates[f] = prev_state[f]
+
 
             # Fallback adicional para patient_name: intentar desde user_profiles
             # Cubre el caso donde agent_state no tiene patient_name (primer turno o
@@ -357,8 +365,9 @@ async def node_check_availability(
             days = 7 - dt.weekday()
             dt = dt + timedelta(days=days)
 
+        # FIX: pasar datetime (no date) — la firma de get_available_slots espera datetime.
         slots = await calendar_service.get_available_slots(
-            date=dt.date(),
+            date=dt,
             duration_minutes=duration,
         )
 
@@ -548,20 +557,19 @@ async def node_book_appointment(
             start=dt.isoformat(),
             end=end_dt.isoformat(),
         )
-        event = await calendar_service.create_event(
+        # FIX: create_event retorna tuple[str, str] (event_id, html_link).
+        # Kwargs correctos: start/end (no start_time/end_time).
+        event_id, event_link = await calendar_service.create_event(
+            start=dt,
+            end=end_dt,
             title=f"{service} - {patient}",
-            start_time=dt,
-            end_time=end_dt,
             description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
         )
-        event_id = event.get("id")
-        event_link = event.get("htmlLink")
 
         # GUARD: verificar que el evento fue realmente creado
         if not event_id:
             logger.error(
                 "[node_book_appointment] create_event no devolvió ID — fallo silencioso en Calendar",
-                event_response=str(event)[:200],
             )
             return {
                 "last_error": "Error confirmando la cita en Google Calendar (sin ID). Por favor llame a la clínica. 📞",
@@ -581,16 +589,18 @@ async def node_book_appointment(
         appt_id = None
         if db_service:
             try:
-                success, msg, appt = await db_service.create_appointment(
-                    session=None,
-                    phone_number=state.get("phone_number", ""),
-                    appointment_datetime=dt,
-                    service_type=service,
-                    project_id=state.get("project_id"),
-                    metadata={"google_event_id": event_id, "patient_name": patient},
-                )
-                if appt:
-                    appt_id = str(appt.id)
+                from db import get_async_session
+                async with get_async_session() as session:
+                    success, msg, appt = await db_service.create_appointment(
+                        session=session,
+                        phone_number=state.get("phone_number", ""),
+                        appointment_datetime=dt,
+                        service_type=service,
+                        project_id=state.get("project_id"),
+                        metadata={"google_event_id": event_id, "patient_name": patient},
+                    )
+                    if appt:
+                        appt_id = str(appt.id)
             except Exception as e:
                 logger.warning("[node_book_appointment] error creando cita en DB (no crítico)", error=str(e))
 
@@ -912,7 +922,8 @@ def _no_appointment_found() -> Dict[str, Any]:
         "google_event_id": None,
         "google_event_link": None,
         "appointment_id": None,
-        "datetime_preference": None,
+        # datetime_preference NO se limpia aquí para evitar borrar la preferencia
+        # que el usuario acaba de dar en el turno actual antes de check_availability.
     }
 
 
@@ -1126,29 +1137,30 @@ async def node_reschedule_appointment(
         new_event_id = None
         new_event_link = None
         if calendar_service:
-            event = await calendar_service.create_event(
+            # FIX: create_event retorna tuple[str, str]. Kwargs: start/end (no start_time/end_time).
+            new_event_id, new_event_link = await calendar_service.create_event(
+                start=dt,
+                end=end_dt,
                 title=f"{service} - {patient}",
-                start_time=dt,
-                end_time=end_dt,
                 description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
             )
-            new_event_id = event.get("id")
-            new_event_link = event.get("htmlLink")
 
         # 4. Crear nueva cita en DB
         new_appt_id = None
         if db_service:
             try:
-                _, __, appt = await db_service.create_appointment(
-                    session=None,
-                    phone_number=state.get("phone_number", ""),
-                    appointment_datetime=dt,
-                    service_type=service,
-                    project_id=state.get("project_id"),
-                    metadata={"google_event_id": new_event_id, "patient_name": patient},
-                )
-                if appt:
-                    new_appt_id = str(appt.id)
+                from db import get_async_session
+                async with get_async_session() as session:
+                    _, __, appt = await db_service.create_appointment(
+                        session=session,
+                        phone_number=state.get("phone_number", ""),
+                        appointment_datetime=dt,
+                        service_type=service,
+                        project_id=state.get("project_id"),
+                        metadata={"google_event_id": new_event_id, "patient_name": patient},
+                    )
+                    if appt:
+                        new_appt_id = str(appt.id)
             except Exception as e:
                 logger.warning("Error creando nueva cita en DB", error=str(e))
 
@@ -1385,35 +1397,61 @@ async def node_generate_response(
 
 
 def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
-    """Construye dict de contexto para generación de respuesta."""
-    return {
-        # Tiempo actual en Ecuador — CRÍTICO para que el LLM no confunda
-        # horas futuras con pasadas (el modelo usa UTC internamente)
-        "hora_actual_ecuador": state.get("hora_actual", ""),
-        "fecha_hoy_ecuador": state.get("fecha_hoy", ""),
-        "dia_semana": state.get("dia_semana_hoy", ""),
-        # Flujo de cita
-        "intent": state.get("intent"),
-        "patient_name": state.get("patient_name"),
-        "missing_fields": state.get("missing_fields", []),
-        "available_slots": state.get("available_slots", []),
-        "selected_slot": state.get("selected_slot"),
-        "confirmation_result": state.get("confirmation_result"),
-        "confirmation_type": state.get("confirmation_type"),
-        "awaiting_confirmation": state.get("awaiting_confirmation", False),
-        "appointment_id": state.get("appointment_id"),
-        "google_event_id": state.get("google_event_id"),
-        "google_event_link": state.get("google_event_link"),
-        "selected_service": state.get("selected_service"),
-        "datetime_preference": state.get("datetime_preference"),
-        "confirmation_sent": state.get("confirmation_sent", False),
-        "last_error": state.get("last_error"),
-        "conversation_turns": state.get("conversation_turns", 0),
-        "semantic_memory_context": state.get("semantic_memory_context", ""),
-        # Campos del forcing tool
-        "calendar_lookup_done": state.get("calendar_lookup_done", False),
-        "calendar_appointment_found": state.get("calendar_appointment_found", False),
+    """
+    Construye un contexto ESTRICTAMENTE ESTRUCTURADO para el LLM.
+    Sigue el patrón de 'Edit Field' de n8n: solo variables necesarias y formateadas.
+    """
+    # 1. Estado del Calendario (La Verdad Absoluta)
+    calendar_truth = {
+        "has_appointment": state.get("calendar_appointment_found", False),
         "existing_appointments": state.get("existing_appointments", []),
+        "google_event_id": state.get("google_event_id"),
+        "lookup_performed": state.get("calendar_lookup_done", False)
+    }
+
+    # 2. Estado de Disponibilidad
+    availability_truth = {
+        "slots_available": state.get("available_slots", []),
+        "preference_match": False,
+        "requested_datetime": state.get("datetime_preference")
+    }
+
+    if availability_truth["requested_datetime"] and availability_truth["slots_available"]:
+        try:
+            pref = availability_truth["requested_datetime"].replace("Z", "").split(".")[0]
+            if any(s.replace("Z", "").split(".")[0] == pref for s in availability_truth["slots_available"]):
+                availability_truth["preference_match"] = True
+        except:
+            pass
+
+    # 3. Perfil del Usuario
+    user_profile = {
+        "name": state.get("patient_name"),
+        "phone": state.get("phone_number"),
+        "selected_service": state.get("selected_service"),
+        "service_duration": state.get("service_duration")
+    }
+
+    # 4. Control del Flujo
+    flow_control = {
+        "intent": state.get("intent"),
+        "missing_fields": state.get("missing_fields", []),
+        "awaiting_confirmation": state.get("awaiting_confirmation", False),
+        "confirmation_type": state.get("confirmation_type"),
+        "confirmation_sent": state.get("confirmation_sent", False),
+        "conversation_turns": state.get("conversation_turns", 0)
+    }
+
+    return {
+        "calendar": calendar_truth,
+        "availability": availability_truth,
+        "user": user_profile,
+        "flow": flow_control,
+        "system_time": {
+            "hora_ecuador": state.get("hora_actual"),
+            "fecha_ecuador": state.get("fecha_hoy"),
+            "dia_semana": state.get("dia_semana_hoy")
+        }
     }
 
 
@@ -1442,8 +1480,8 @@ def _format_datetime_readable(iso_str: str) -> str:
 def _format_slots(slots):
     """
     Convierte slots (ISO strings o dicts) a formato legible para WhatsApp.
-    Formato: "viernes 17:00, lunes 09:00" — incluye el día para evitar
-    que el LLM confunda slots de diferentes fechas o evalúe mal si ya pasaron.
+    Formato: "viernes 17:00 (10 Abr), lunes 09:00 (13 Abr)" — incluye el día y la fecha
+    para evitar que el LLM confunda slots de diferentes fechas o evalúe mal si ya pasaron.
     """
     _DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
     formatted = []
@@ -1466,7 +1504,8 @@ def _format_slots(slots):
             continue
 
         dia = _DIAS[dt.weekday()]
-        formatted.append(f"{dia} {dt.strftime('%H:%M')}")
+        fecha_corta = dt.strftime("%d %b")
+        formatted.append(f"{dia} {dt.strftime('%H:%M')} ({fecha_corta})")
 
     return ", ".join(formatted)
 
@@ -1489,44 +1528,55 @@ async def node_generate_response_with_tools(
 
     # ✅ contexto
     context_dict = _build_llm_context(state)
-    context_parts = []
+    import json
+    context_json = json.dumps(context_dict, indent=2, ensure_ascii=False)
+
+    # Pretty print del contexto en los logs para observabilidad
+    logger.info("CONTEXTO LLM (FUENTE DE VERDAD):\n%s", context_json)
+
+    context_parts = [
+        f"DATOS ESTRUCTURADOS DEL SISTEMA (FUENTE DE VERDAD):\n{context_json}"
+    ]
 
     # CRÍTICO: siempre incluir la hora/fecha actual de Ecuador.
     # El system prompt dice "usa SIEMPRE hora_actual_ecuador" pero sin este dato
     # el LLM no puede evaluar si un slot ya pasó o si está en el futuro.
-    hora_ec = context_dict.get("hora_actual_ecuador")
-    fecha_ec = context_dict.get("fecha_hoy_ecuador")
-    dia_ec = context_dict.get("dia_semana")
+    system_time = context_dict.get("system_time", {})
+    hora_ec = system_time.get("hora_ecuador")
+    fecha_ec = system_time.get("fecha_hoy")
+    dia_ec = system_time.get("dia_semana")
     if hora_ec:
         context_parts.append(
-            f"Hora actual en Ecuador: {hora_ec} del {dia_ec} {fecha_ec}. "
-            "Slots PASADOS no deben ofrecerse."
+            f"Sincronización Temporal: Hora actual en Ecuador: {hora_ec} del {dia_ec} {fecha_ec}. "
+            "REGLA CRÍTICA: Los slots PASADOS respecto a esta hora NO deben ofrecerse bajo ninguna circunstancia."
         )
 
-    intent = context_dict.get("intent")
+    intent = context_dict.get("flow", {}).get("intent")
     if intent:
-        context_parts.append(f"Intención del usuario: {intent}")
+        context_parts.append(f"Intención detectada: {intent}")
 
-    missing = context_dict.get("missing_fields", [])
+    missing = context_dict.get("flow", {}).get("missing_fields", [])
     if missing:
         context_parts.append(
-            f"Datos que faltan: {', '.join(missing)}. Pídelos de a uno."
+            f"Estado de validación: Faltan los siguientes campos: {', '.join(missing)}. "
+            "Instrucción: Pídelos de uno en uno, no todos a la vez."
         )
 
-    patient_name = context_dict.get("patient_name")
+    user = context_dict.get("user", {})
+    patient_name = user.get("name")
     if patient_name:
-        context_parts.append(f"Nombre del paciente: {patient_name}")
+        context_parts.append(f"Paciente: {patient_name}")
 
-    selected_service = context_dict.get("selected_service")
+    selected_service = user.get("selected_service")
     if selected_service:
-        context_parts.append(f"Servicio seleccionado: {selected_service}")
+        context_parts.append(f"Servicio: {selected_service}")
 
-    datetime_pref = context_dict.get("datetime_preference")
+    datetime_pref = context_dict.get("availability", {}).get("requested_datetime")
     if datetime_pref:
-        context_parts.append(f"Fecha/hora preferida: {datetime_pref}")
+        context_parts.append(f"Preferencia temporal del usuario: {datetime_pref}")
 
     # ✅ slots disponibles — mostrar los 4 más cercanos a la hora solicitada
-    slots = context_dict.get("available_slots", [])
+    slots = context_dict.get("availability", {}).get("slots_available", [])
     if slots:
         preferred_slots = slots
         if datetime_pref:
@@ -1545,28 +1595,163 @@ async def node_generate_response_with_tools(
                 preferred_slots = sorted(slots, key=_slot_distance)
             except Exception:
                 pass
-        readable = _format_slots(preferred_slots[:4])
-        context_parts.append(f"Slots disponibles: {readable}")
 
-    selected_slot = context_dict.get("selected_slot")
+        # Verificamos si alguno de los slots coincide exactamente con la preferencia del usuario
+        exact_match = None
+        if datetime_pref:
+            logger.info("DEBUG_MATCH: Iniciando comparacion de slots", pref=datetime_pref, slots=slots)
+            try:
+                # Convertimos la preferencia a objeto datetime para comparar valor, no string
+                pref_dt = datetime.fromisoformat(datetime_pref.replace("Z", "+00:00"))
+
+                for s in slots:
+                    try:
+                        # Convertimos el slot a objeto datetime
+                        slot_dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+                        # Comparamos solo año, mes, día, hora y minuto
+                        if (pref_dt.year == slot_dt.year and
+                            pref_dt.month == slot_dt.month and
+                            pref_dt.day == slot_dt.day and
+                            pref_dt.hour == slot_dt.hour and
+                            pref_dt.minute == slot_dt.minute):
+
+                            logger.info("DEBUG_MATCH: ¡MATCH ENCONTRADO!", slot=s, pref=datetime_pref)
+                            exact_match = s
+                            break
+                    except Exception as e:
+                        logger.warning(f"DEBUG_MATCH: Error parseando slot {s}: {e}")
+            except Exception as e:
+                logger.error(f"DEBUG_MATCH: Error parseando preferencia {datetime_pref}: {e}")
+
+        readable = _format_slots(preferred_slots[:4])
+        context_parts.append(f"Slots disponibles (formato legible): {readable}")
+
+        if exact_match:
+            # INSTRUCCIÓN DOMINANTE: Se coloca al inicio para que el LLM no la ignore
+            context_parts.insert(0,
+                f"🚨 ORDEN DIRECTA DEL SISTEMA: El horario solicitado ({datetime_pref}) "
+                f"ESTÁ CONFIRMADO COMO DISPONIBLE. Tienes PROHIBIDO decir que no hay disponibilidad. "
+                f"No analices los slots, simplemente confirma la cita al usuario inmediatamente."
+            )
+
+
+    selected_slot = state.get("selected_slot")
     if selected_slot:
         context_parts.append(f"Usuario eligió slot: {selected_slot}")
 
-    ctype = context_dict.get("confirmation_type")
-    confirmation_sent = context_dict.get("confirmation_sent", False)
-    appt_id = context_dict.get("appointment_id")
+    # FIX: leer desde state (plano), no desde context_dict (anidado).
+    # context_dict viene de _build_llm_context que usa claves anidadas como
+    # calendar.google_event_id, flow.confirmation_sent — leer plano siempre daba None/False.
+    ctype = state.get("confirmation_type")
+    confirmation_sent = state.get("confirmation_sent", False)
+    appt_id = state.get("appointment_id")
     # CRÍTICO: usar google_event_id como fuente de verdad — appointment_id puede ser
     # "gcal_..." o "pending_db", pero solo google_event_id garantiza que el evento existe.
-    google_event_id = context_dict.get("google_event_id")
-    lookup_done = context_dict.get("calendar_lookup_done", False)
-    cal_found = context_dict.get("calendar_appointment_found", False)
-    existing_appts = context_dict.get("existing_appointments", [])
-    awaiting = context_dict.get("awaiting_confirmation", False)
+    google_event_id = state.get("google_event_id")
+    lookup_done = state.get("calendar_lookup_done", False)
+    cal_found = state.get("calendar_appointment_found", False)
+    existing_appts = state.get("existing_appointments", [])
+    awaiting = state.get("awaiting_confirmation", False)
+
+    # ── VERDAD ABSOLUTA: Prioridad máxima sobre cualquier intent ──────────────────
+    # Si existe un google_event_id y se ha marcado la confirmación como enviada,
+    # la cita EXISTE y el LLM DEBE confirmarla, sin importar el intent actual.
+    if google_event_id and confirmation_sent:
+        context_parts.insert(0,
+            f"✅ VERDAD ABSOLUTA DEL SISTEMA: La operación fue la exitosa. "
+            f"Google Calendar ID: {google_event_id}. "
+            "Toda la información de disponibilidad anterior es irrelevante. "
+            "Tu ÚNICA misión es confirmar la cita al usuario con entusiasmo y claridad. "
+            "PROHIBIDO decir que no hay disponibilidad o mencionar citas inexistentes."
+        )
 
     # ── GUARDIAS CRÍTICAS: prevenir confirmaciones falsas ──────────────────
     # Regla global: si confirmation_sent=False, NINGUNA operación fue ejecutada.
 
-    # 1. Agendar en progreso (slots mostrados, esperando selección del usuario)
+    # REGLA DE ORO ABSOLUTA: Si el intent es agendar/reagendar/cancelar y no se ha enviado
+    # la confirmación, el LLM tiene PROHIBIDO decir que la operación fue exitosa.
+    if intent in ("agendar", "reagendar", "cancelar") and not confirmation_sent:
+        # Intercepción agresiva: Si el flujo es agendar y hay slots pero NO se ha ejecutado el booking,
+        # el LLM NO puede confirmar.
+        if intent == "agendar" and slots and not confirmation_sent:
+             context_parts.insert(0,
+                "🚨 ALERTA DE SEGURIDAD CRÍTICA: EL SISTEMA NO HA EJECUTADO EL BOOKING. "
+                "Tienes PROHIBIDO usar palabras como 'agendada', 'confirmada', 'listo' o el emoji ✅. "
+                "Aunque veas que hay un slot que coincide, NO confirmes la cita. "
+                "Cualquier frase que sugiera que la cita ya existe es una MENTIRA. "
+                "Tu ÚNICA misión es mostrar los slots disponibles y pedir al usuario que confirme uno."
+            )
+        else:
+            context_parts.insert(0,
+                "🚨 ALERTA DE SEGURIDAD CRÍTICA: El sistema NO ha ejecutado ninguna operación de reserva. "
+                "Tienes PROHIBIDO usar palabras como 'agendada', 'confirmada', 'listo' o el emoji ✅. "
+                "Cualquier frase que sugiera que la cita ya existe o fue creada es una MENTIRA y una alucinación. "
+                "Sigue estrictamente el flujo: si faltan datos, pídelos; si hay slots, ofrécelos. "
+                "NUNCA confirmes el éxito hasta que confirmation_sent sea True."
+            )
+
+    # ── PUERTA DE VERDAD (Truth Gate) ──────────────────────────────────────
+    # Si el flujo es crítico y faltan datos esenciales, el LLM debe ser restringido
+    # para que no alucine la respuesta.
+
+    if intent == "agendar":
+        # PRIORIDAD MÁXIMA: Verificamos si la cita ya fue creada en este turno.
+        # FIX: google_event_id + confirmation_sent — evitar que una cita EXISTENTE
+        # (encontrada por check_existing para un paciente que ya tiene cita) se confunda
+        # con una cita RECIÉN CREADA. confirmation_sent solo se setea en node_book_appointment.
+        if google_event_id and confirmation_sent:
+            context_parts.insert(0,
+                f"✅ VERDAD ABSOLUTA: LA CITA HA SIDO CREADA EXITOSAMENTE (ID: {google_event_id}). "
+                "Toda la información de disponibilidad anterior es irrelevante porque el slot ya es del usuario. "
+                "Sigue estrictamente el formato de confirmación de éxito."
+            )
+        elif not lookup_done and not slots:
+            context_parts.append(
+                "🚫 BLOQUEO DE RESPUESTA: No se ha verificado la disponibilidad en el calendario. "
+                "PROHIBIDO confirmar cualquier horario. Debes informar que estás verificando "
+                "la disponibilidad y esperar a que el sistema proporcione los slots."
+            )
+        elif not slots and not (lookup_done and not cal_found):
+            context_parts.append(
+                "🚫 BLOQUEO DE RESPUESTA: El calendario no devolvió slots disponibles. "
+                "NO inventes horarios. Informa que no hay disponibilidad en este momento "
+                "y sugiere otro día o servicio."
+            )
+        elif not confirmation_sent:
+            # EL CASO CRÍTICO: Hay slots, pero NO se ha ejecutado el booking.
+            # El LLM NO puede confirmar, solo puede ofrecer los slots.
+            context_parts.append(
+                "🚫 BLOQUEO DE CONFIRMACIÓN: Tienes slots disponibles, pero la cita AÚN NO ha sido creada. "
+                "Tienes PROHIBIDO decir 'Su cita ha sido agendada' o 'está confirmada'. "
+                "Tu ÚNICA misión es mostrar los slots disponibles y pedir al usuario que confirme uno."
+            )
+
+    if intent in ("reagendar", "cancelar"):
+        # Si quiere modificar pero no sabemos si tiene cita
+        if not lookup_done:
+            context_parts.append(
+                "🚫 BLOQUEO DE RESPUESTA: Aún no se ha verificado si el usuario tiene una cita activa. "
+                "PROHIBIDO decir 'He encontrado su cita' o 'Procedo a cancelarla'. "
+                "Informa que estás consultando el sistema."
+            )
+        elif not cal_found:
+            # VERDAD ABSOLUTA: El sistema confirmó que NO hay citas.
+            # El LLM debe ser restringido agresivamente para que no use memoria residual.
+            context_parts.insert(0,
+                "🚨 ALERTA DE SEGURIDAD CRÍTICA: Se verificó Google Calendar y NO EXISTE ninguna cita activa "
+                "para este teléfono. Tienes PROHIBIDO mencionar cualquier horario previo, cita existente "
+                "o referirte a una 'cita programada'. Cualquier dato que sugiera que el usuario tiene una cita "
+                "es una ALUCINACIÓN. Tu ÚNICA respuesta debe ser informar que no hay citas registradas "
+                "y ofrecer agendar una nueva."
+            )
+            context_parts.append(
+                "🚫 BLOQUEO DE RESPUESTA: Se verificó el sistema y NO hay citas activas. "
+                "PROHIBIDO confirmar cualquier cancelación o cambio. "
+                "Informa claramente que no existe una cita registrada para este teléfono."
+            )
+
+    # 1. Agendar en progreso (slots mostados, esperando selección del usuario)
     if awaiting and ctype == "book" and not confirmation_sent and not google_event_id:
         context_parts.append(
             "⚠️ INSTRUCCIÓN CRÍTICA: La cita AÚN NO ha sido creada en el sistema. "
@@ -1601,19 +1786,20 @@ async def node_generate_response_with_tools(
             lines.append(f"• {svc_name} — {_format_datetime_readable(start_dt)}")
         appts_str = "\n".join(lines)
         context_parts.append(
-            f"IMPORTANTE: Se consultó Google Calendar y el paciente YA TIENE cita(s) agendada(s):\n"
+            f"SITUACIÓN REAL: Se consultó Google Calendar y el paciente YA TIENE cita(s) agendada(s):\n"
             f"{appts_str}\n"
             "Informa al usuario sobre su(s) cita(s) existente(s) y pregunta si desea "
             "reagendar, cancelar o agregar una cita adicional."
         )
     elif lookup_done and not cal_found and intent == "agendar":
         # Verificación real en Calendar: NO hay citas previas para este usuario.
-        # CRÍTICO: evitar que el LLM alucine citas basándose en el historial de conversación.
+        # CRÍTICO: evitar que el LLM alucine citas basándose en el historial de conversación o memoria semántica.
         context_parts.append(
-            "⚠️ INSTRUCCIÓN CRÍTICA: Se verificó Google Calendar en tiempo real y este usuario "
+            "⚠️ VERDAD ABSOLUTA DEL SISTEMA: Se verificó Google Calendar en tiempo real y este usuario "
             "NO tiene ninguna cita activa registrada. "
-            "PROHIBIDO decir 'ya tiene una cita' o frases similares. "
-            "Procede con el flujo normal para agendar una nueva cita."
+            "PROHIBIDO decir 'ya tiene una cita' o 'su cita está a las...'. "
+            "Cualquier información en la memoria semántica o historial que sugiera una cita actual es FALSA. "
+            "Informa que no hay citas y procede a agendar la nueva."
         )
 
     if confirmation_sent and ctype == "cancel":
@@ -1702,8 +1888,28 @@ async def node_generate_response_with_tools(
         )
 
     semantic = context_dict.get("semantic_memory_context")
-    if semantic:
+    # ── DESACTIVACIÓN DE MEMORIA SEMÁNTICA EN FLUJOS CRÍTICOS ────────────────
+    # Si la intención es agendar, cancelar o reagendar, ignoramos la memoria
+    # semántica para evitar que el LLM alucine basándose en fragmentos antiguos.
+    intent = context_dict.get("flow", {}).get("intent")
+    if semantic and intent not in ("agendar", "cancelar", "reagendar"):
         context_parts.append(f"INFORMACIÓN PREVIA DEL USUARIO:\n{semantic}")
+    elif semantic and intent in ("agendar", "cancelar", "reagendar"):
+        # Opcional: dejar una nota de que la memoria fue desactivada para precisión
+        # context_parts.append("SISTEMA: Memoria semántica desactivada para garantizar precisión en el agendamiento.")
+        pass
+
+    # ── PASOS DE RAZONAMIENTO (Estilo n8n) ──────────────────────────────
+    # Obligamos al LLM a seguir un proceso estructurado antes de responder.
+    context_parts.append(
+        "INSTRUCCIÓN DE PROCESAMIENTO (Sigue estos pasos estrictamente):\n"
+        "PASO 1 - REVISIÓN DE HISTORIAL: Lee los mensajes anteriores. ¿Qué pidió el cliente? ¿Qué datos ya dio?\n"
+        "PASO 2 - RAZONAMIENTO (Think): Compara la petición del usuario con la VERDAD ABSOLUTA del sistema (JSON). "
+        "¿La herramienta de calendario confirmó la operación? Si confirmation_sent es False, la cita NO existe.\n"
+        "PASO 3 - VALIDACIÓN DE SALIDA: Si el usuario pidió agendar/reagendar y no hay un google_event_id confirmado, "
+        "está PROHIBIDO decir que la cita fue creada. Pide la info faltante o informa que estás procesando.\n"
+        "PASO 4 - RESPUESTA: Responde de forma amable, corta (máx 3-4 líneas) y basada solo en la verdad del sistema."
+    )
 
     context_str = (
         "\n".join(context_parts) if context_parts else "Sin contexto específico."
