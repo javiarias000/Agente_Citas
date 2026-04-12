@@ -1,19 +1,91 @@
 #!/usr/bin/env python3
 """
-Herramientas para interactuar con el sistema de memoria semántica (memory-agent).
+Herramientas de memoria para el agente Arcadium.
 
 Incluye:
-- upsert_memory_arcadium: Guarda hechos relevantes sobre el usuario en el store vectorial.
+- upsert_memory_arcadium: memoria semántica vectorial (legado, sin tipos)
+- save_patient_memory: memoria estructurada y tipada (estilo Claude Code)
 """
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
+import structlog
 from langchain_core.tools import tool, InjectedToolArg
 from langgraph.store.base import BaseStore
 from pydantic import Field
 
+logger = structlog.get_logger("memory_tools")
+
+
+# ─── Tool tipado (nuevo — estilo Claude Code) ─────────────────────────────────
+
+@tool
+async def save_patient_memory(
+    type: Literal["user", "feedback", "project", "reference"] = Field(
+        description=(
+            "Tipo de memoria:\n"
+            "  user      → perfil permanente del paciente: nombre real, alergias, "
+            "condiciones médicas, preferencias de horario, datos de contacto adicionales.\n"
+            "  feedback  → correcciones y patrones detectados: 'no le gustan los lunes', "
+            "'prefiere mensajes cortos', 'se pone ansioso en consultas largas'.\n"
+            "  project   → tratamientos en curso o notas clínicas: 'tratamiento de "
+            "ortodoncia iniciado 2026-01, revisión cada 3 meses', 'extracción muela "
+            "del juicio pendiente'.\n"
+            "  reference → punteros a sistemas externos: google_event_id de última cita, "
+            "número de expediente, ID en sistema externo."
+        )
+    ),
+    name: str = Field(
+        description=(
+            "Identificador corto y único para esta memoria. "
+            "Snake_case, sin espacios. Ej: 'alergia_penicilina', 'prefiere_mananas', "
+            "'tratamiento_ortodoncia', 'ultima_cita_id'."
+        )
+    ),
+    description: str = Field(
+        description=(
+            "Una sola línea describiendo el contenido. Máx 120 caracteres. "
+            "Se usa como índice para decidir relevancia. "
+            "Ej: 'Alérgico a la penicilina — reacción severa confirmada'"
+        )
+    ),
+    body: str = Field(
+        description=(
+            "Contenido completo de la memoria. "
+            "Para feedback: incluir regla + 'Por qué:' + 'Cómo aplicar:'. "
+            "Para project: incluir fecha de inicio, estado actual y próximos pasos. "
+            "Para user/reference: datos directos sin formato especial. "
+            "Ejemplo feedback: "
+            "'No ofrecer slots los lunes.\\nPor qué: el paciente mencionó que trabaja "
+            "doble turno los lunes.\\nCómo aplicar: en check_availability filtrar lunes.'"
+        )
+    ),
+) -> str:
+    """
+    Guarda o actualiza una memoria tipada sobre el paciente en la base de datos.
+    Persiste entre sesiones. Equivalente al sistema de memoria de Claude Code.
+
+    CUÁNDO USAR:
+    - El paciente menciona alergias, condiciones médicas, miedos → type='user'
+    - El paciente corrige algo o revela una preferencia → type='feedback'
+    - Se inicia o completa un tratamiento → type='project'
+    - Se crea una cita y se quiere guardar el ID → type='reference'
+
+    CUÁNDO NO USAR:
+    - Datos de la sesión actual (nombre, servicio, fecha de la cita en curso)
+      → esos van en el state machine, no en memoria.
+    - Información que ya está en el estado del sistema.
+
+    NOTA: La ejecución real ocurre en node_execute_memory_tools con el phone del estado.
+    """
+    # Este cuerpo no se ejecuta directamente — node_execute_memory_tools
+    # intercepta el tool call y lo ejecuta con el phone del estado.
+    return f"✅ Memoria '{name}' ({type}) registrada"
+
+
+# ─── Tool vectorial legado (sin tipos — mantener compatibilidad) ───────────────
 
 @tool
 async def upsert_memory_arcadium(
@@ -35,24 +107,16 @@ async def upsert_memory_arcadium(
     store: Annotated[BaseStore, InjectedToolArg] = None,
 ) -> str:
     """
-    Guarda o actualiza una memoria semántica sobre el usuario.
+    Guarda o actualiza una memoria semántica sobre el usuario en el vector store.
+
+    PREFERIR save_patient_memory para nuevas memorias — tiene tipos estructurados
+    y persiste en base de datos relacional. Este tool es legado para compatibilidad
+    con el vector store existente.
 
     CUÁNDO USAR:
-    - El usuario menciona preferencias (comida, horarios, servicios)
-    - Datos médicos importantes (alergias, condiciones, miedos)
-    - Información personal relevante (nombre, trabajo, familia)
-    - Cualquier dato que deba recordarse en futuras conversaciones
-    - Cuando el usuario corrige o actualiza información previamente guardada
+    - Cuando se quiere búsqueda semántica vectorial además de DB estructurada.
 
-    CUÁNDO NO USAR:
-    - Información de sesión actual ya en el estado (nombre, servicio, fecha)
-      para eso está el state machine.
-    - Datos que no son relevantes a largo plazo.
-
-    NOTA:
-    - user_id y store se inyectan automáticamente desde el grafo (no pasar).
-    - Si no se proporciona memory_id, se crea una nueva memoria.
-    - El store debe estar configurado con embeddings (ver MEMORY_AGENT_* en .env).
+    NOTA: user_id y store se inyectan automáticamente desde el grafo.
     """
     if user_id is None:
         return "Error: user_id no inyectado"
@@ -60,7 +124,6 @@ async def upsert_memory_arcadium(
         return "Error: store no inyectado"
 
     try:
-        # Preparar datos
         data = {
             "content": content,
             "context": context,
@@ -69,14 +132,12 @@ async def upsert_memory_arcadium(
         }
 
         if memory_id:
-            # Actualizar memoria existente
             await store.ainput(
                 ("memories", user_id, memory_id),
                 data,
             )
             return f"✅ Memoria actualizada: {content}"
         else:
-            # Crear nueva memoria
             memory_id = str(uuid.uuid4())
             await store.aput(
                 ("memories", user_id, memory_id),
@@ -85,5 +146,5 @@ async def upsert_memory_arcadium(
             return f"✅ Memoria guardada: {content}"
 
     except Exception as e:
-        logger.error("Error guardando memoria", error=str(e), exc_info=True)
+        logger.error("Error guardando memoria vectorial", error=str(e), exc_info=True)
         return f"❌ Error guardando memoria: {str(e)}"

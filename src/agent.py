@@ -158,18 +158,16 @@ class ArcadiumAgent:
         from src.state import get_missing_fields
         state["missing_fields"] = get_missing_fields(state)
 
-        # NUEVO: Enriquecer con contexto semántico si memory_agent está habilitado
-        if self.memory_integration:
-            phone = self.session_id.replace("deyy_", "")
-            semantic_context = await self._get_semantic_context(phone, message)
-            if semantic_context:
-                # Añadir al estado; el prompt del sistema debería referenciar esta variable
-                state["semantic_memory_context"] = semantic_context
-                logger.debug(
-                    "Contexto semántico inyectado",
-                    phone=phone,
-                    memories_count=semantic_context.count('\n')
-                )
+        # Enriquecer con memoria del paciente (tipada + semántica)
+        phone = self.session_id.replace("deyy_", "")
+        patient_context = await self._load_patient_context(phone, message)
+        if patient_context:
+            state["semantic_memory_context"] = patient_context
+            logger.debug(
+                "Contexto de paciente inyectado",
+                phone=phone,
+                chars=len(patient_context),
+            )
 
         # Invocar grafo
         config = {"configurable": {"thread_id": self.session_id}}
@@ -221,55 +219,64 @@ class ArcadiumAgent:
             should_escalate=state.get("should_escalate", False),
         )
 
-    async def _get_semantic_context(self, phone: str, query: str) -> str:
+    async def _load_patient_context(self, phone: str, query: str) -> str:
         """
-        Recupera memorias semánticas relevantes para enriquecer el contexto del LLM.
+        Carga el contexto completo del paciente combinando:
+        1. Perfil estructurado (patient_memories tipo 'user') — SIEMPRE incluido.
+        2. Memorias de feedback/project relevantes al query actual.
+        3. Memorias semánticas vectoriales (si memory_agent está habilitado).
 
-        Args:
-            phone: Número de teléfono del usuario
-            query: Texto de la consulta actual (para búsqueda por similitud)
-
-        Returns:
-            String formateado con memorias relevantes, o string vacío si none.
+        El perfil 'user' equivale al MEMORY.md de Claude Code: siempre en contexto,
+        sin importar el intent. Los demás tipos se cargan por relevancia.
         """
-        if not self.memory_integration or not self.memory_integration._initialized:
-            return ""
+        parts: list[str] = []
 
+        # ── 1. Perfil estructurado (siempre) ─────────────────────────────────
         try:
-            user_id = phone  # Usamos phone como user_id
-            limit = getattr(
-                self.memory_integration.settings,
-                'MEMORY_AGENT_MAX_RESULTS',
-                5
-            )
-            threshold = getattr(
-                self.memory_integration.settings,
-                'MEMORY_AGENT_SIMILARITY_THRESHOLD',
-                0.7
-            )
+            from db import get_async_session
+            from services.patient_memory_service import PatientMemoryService
 
-            memories = await self.memory_integration.search_memories(
-                user_id=user_id,
-                query=query,
-                project_id=self.project_id,
-                limit=limit,
-                threshold=threshold
-            )
+            async with get_async_session() as session:
+                mem_svc = PatientMemoryService(session)
+                profile = await mem_svc.load_profile(phone)
+                if profile:
+                    parts.append(PatientMemoryService.format_profile(profile))
 
-            if not memories:
-                return ""
-
-            # Formatear para incluir en prompt
-            lines = ["Memorias relevantes del usuario:"]
-            for mem in memories:
-                lines.append(f"- [{mem['key']}] {mem['content']} (contexto: {mem['context']})")
-
-            return "\n".join(lines)
+                # Cargar feedback y project para contexto adicional
+                all_mem = await mem_svc.load_all(phone)
+                extra = PatientMemoryService.format_full(
+                    all_mem, include_types=["feedback", "project", "reference"]
+                )
+                if extra:
+                    parts.append(f"CONTEXTO ADICIONAL DEL PACIENTE:\n{extra}")
 
         except Exception as e:
-            logger.warning(
-                "Error recuperando contexto semántico",
-                phone=phone,
-                error=str(e)
-            )
-            return ""
+            logger.warning("Error cargando patient_memories", phone=phone, error=str(e))
+
+        # ── 2. Memorias semánticas vectoriales (si disponibles) ───────────────
+        if self.memory_integration and getattr(self.memory_integration, "_initialized", False):
+            try:
+                limit = getattr(self.memory_integration.settings, "MEMORY_AGENT_MAX_RESULTS", 5)
+                threshold = getattr(self.memory_integration.settings, "MEMORY_AGENT_SIMILARITY_THRESHOLD", 0.7)
+
+                memories = await self.memory_integration.search_memories(
+                    user_id=phone,
+                    query=query,
+                    project_id=self.project_id,
+                    limit=limit,
+                    threshold=threshold,
+                )
+                if memories:
+                    lines = ["MEMORIAS SEMÁNTICAS RELACIONADAS:"]
+                    for mem in memories:
+                        lines.append(f"  - {mem['content']} (ctx: {mem['context']})")
+                    parts.append("\n".join(lines))
+            except Exception as e:
+                logger.warning("Error en búsqueda semántica", phone=phone, error=str(e))
+
+        return "\n\n".join(parts) if parts else ""
+
+    # ── Legado — conservado para compatibilidad ───────────────────────────────
+    async def _get_semantic_context(self, phone: str, query: str) -> str:
+        """Legado. Usar _load_patient_context en su lugar."""
+        return await self._load_patient_context(phone, query)

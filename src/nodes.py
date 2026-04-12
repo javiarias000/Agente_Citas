@@ -39,7 +39,7 @@ from src.llm_extractors import (
     extract_intent_llm,
     generate_deyy_response,
 )
-from memory_agent_integration.memory_tools import upsert_memory_arcadium
+from memory_agent_integration.memory_tools import upsert_memory_arcadium, save_patient_memory
 from agents.langchain_compat import create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from functools import partial
@@ -79,12 +79,24 @@ REGLAS INQUEBRANTABLES:
 11. NUNCA repitas una pregunta que ya hiciste en el historial.
 12. Si el usuario ya dio un dato (nombre, servicio, fecha), NO lo pidas de nuevo.
 
-INSTRUCCIÓN ADICIONAL (HERRAMIENTA DE MEMORIA):
-Si el usuario revela información personal importante (nombre, alergias, preferencias, datos médicos, etc.)
-que deba recordarse en futuras conversaciones, usa la herramienta upsert_memory_arcadium.
-- content: describe el hecho de forma clara y concisa.
-- context: indica cuándo/por qué se mencionó (ej: "Mencionado durante conversación del 2025-04-07").
-No anuncies que guardas la información; simplemente usa la herramienta cuando corresponda.
+INSTRUCCIÓN ADICIONAL (SISTEMA DE MEMORIA — ESTILO CLAUDE CODE):
+Tienes acceso a save_patient_memory para guardar información del paciente que persiste entre sesiones.
+Úsala silenciosamente (sin anunciar que guardas) cuando detectes:
+
+  type='user'      → alergias, condiciones médicas, nombre real, preferencias permanentes de horario.
+                     Ej: name='alergia_penicilina', description='Alérgico a la penicilina',
+                         body='Reacción severa confirmada. Por qué: mencionado en consulta. Cómo aplicar: alertar al doctor.'
+  type='feedback'  → correcciones del paciente, preferencias detectadas en conversación.
+                     Ej: name='prefiere_mananas', description='Prefiere citas antes de las 12:00',
+                         body='Siempre pide horario de mañana. Por qué: mencionó que trabaja en la tarde. Cómo aplicar: ofrecer slots 9-12 primero.'
+  type='project'   → tratamientos en curso, notas clínicas, estado de tratamiento activo.
+                     Ej: name='ortodoncia_2026', description='Tratamiento de ortodoncia iniciado enero 2026',
+                         body='Revisión cada 3 meses. Próxima cita estimada: abril 2026.'
+  type='reference' → IDs de citas en Google Calendar, expediente, referencias externas.
+                     Ej: name='ultima_cita_gcal', description='ID del último evento en Google Calendar',
+                         body='Event ID: abc123. Servicio: ortodoncia. Fecha: 2026-04-13.'
+
+REGLA: No guardes datos que ya están en el estado del sistema (nombre, fecha, servicio de la cita actual).
 
 SITUACIÓN ACTUAL:
 {context}
@@ -1892,17 +1904,53 @@ async def node_generate_response_with_tools(
             "Ya van muchos mensajes. Considera ofrecer llamar a la clínica."
         )
 
-    semantic = context_dict.get("semantic_memory_context")
-    # ── DESACTIVACIÓN DE MEMORIA SEMÁNTICA EN FLUJOS CRÍTICOS ────────────────
-    # Si la intención es agendar, cancelar o reagendar, ignoramos la memoria
-    # semántica para evitar que el LLM alucine basándose en fragmentos antiguos.
+    semantic = state.get("semantic_memory_context", "")
     intent = context_dict.get("flow", {}).get("intent")
-    if semantic and intent not in ("agendar", "cancelar", "reagendar"):
-        context_parts.append(f"INFORMACIÓN PREVIA DEL USUARIO:\n{semantic}")
-    elif semantic and intent in ("agendar", "cancelar", "reagendar"):
-        # Opcional: dejar una nota de que la memoria fue desactivada para precisión
-        # context_parts.append("SISTEMA: Memoria semántica desactivada para garantizar precisión en el agendamiento.")
-        pass
+
+    # ── MEMORIA TIPADA (estilo Claude Code) ──────────────────────────────────
+    # El semantic_memory_context puede contener secciones marcadas:
+    #   "PERFIL DEL PACIENTE" → tipo 'user' → SIEMPRE en contexto
+    #   "CONTEXTO ADICIONAL"  → tipos feedback/project/reference → según intent
+    #   "MEMORIAS SEMÁNTICAS" → vector search → según intent
+    #
+    # Regla: el perfil 'user' (alergias, preferencias permanentes) siempre aplica.
+    # Los demás tipos solo en intents no críticos para evitar alucinaciones.
+    if semantic:
+        profile_section = ""
+        extra_section = ""
+
+        # Separar perfil de contexto adicional/semántico
+        lines = semantic.split("\n")
+        in_profile = False
+        in_extra = False
+        profile_lines: list[str] = []
+        extra_lines: list[str] = []
+
+        for line in lines:
+            if line.startswith("PERFIL DEL PACIENTE"):
+                in_profile = True
+                in_extra = False
+                profile_lines.append(line)
+            elif line.startswith("CONTEXTO ADICIONAL") or line.startswith("MEMORIAS SEMÁNTICAS"):
+                in_extra = True
+                in_profile = False
+                extra_lines.append(line)
+            elif in_profile:
+                profile_lines.append(line)
+            elif in_extra:
+                extra_lines.append(line)
+
+        profile_section = "\n".join(profile_lines).strip()
+        extra_section = "\n".join(extra_lines).strip()
+
+        # Perfil del paciente: siempre incluir (incluso en intents críticos)
+        if profile_section:
+            context_parts.append(profile_section)
+
+        # Contexto adicional: solo en intents no críticos
+        if extra_section and intent not in ("agendar", "cancelar", "reagendar"):
+            context_parts.append(extra_section)
+
 
     # ── PASOS DE RAZONAMIENTO (Estilo n8n) ──────────────────────────────
     # Obligamos al LLM a seguir un proceso estructurado antes de responder.
@@ -1970,18 +2018,21 @@ async def node_generate_response_with_tools(
 
     lm_messages = [SystemMessage(content=system_prompt)] + sanitized
 
-    # ✅ tool binding
-    bound_tool = None
-    if vector_store:
-        user_id = state.get("phone_number", "")
-        if user_id:
-            bound_tool = upsert_memory_arcadium
-        else:
-            logger.warning("No hay phone_number en estado, omitiendo tool binding")
+    # ✅ tool binding — siempre exponer save_patient_memory si hay phone
+    phone_number = state.get("phone_number", "")
+    memory_tools = []
+    if phone_number:
+        # save_patient_memory: tool principal tipado (siempre disponible)
+        memory_tools.append(save_patient_memory)
+        # upsert_memory_arcadium: legado vectorial (solo si hay vector_store)
+        if vector_store:
+            memory_tools.append(upsert_memory_arcadium)
+    else:
+        logger.warning("No hay phone_number en estado, omitiendo memory tools")
 
     try:
-        if bound_tool:
-            llm_with_tools = llm.bind_tools([bound_tool])
+        if memory_tools:
+            llm_with_tools = llm.bind_tools(memory_tools)
             response = await llm_with_tools.ainvoke(lm_messages)
         else:
             response = await llm.ainvoke(lm_messages)
@@ -2042,7 +2093,7 @@ async def node_execute_memory_tools(
         tool_args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
         tool_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
 
-        if tool_name != "upsert_memory_arcadium":
+        if tool_name not in ("upsert_memory_arcadium", "save_patient_memory"):
             logger.warning("Tool desconocido en node_execute_memory_tools", tool_name=tool_name)
             continue
 
@@ -2050,47 +2101,71 @@ async def node_execute_memory_tools(
             logger.warning("No hay phone_number en estado, omitiendo tool call")
             continue
 
+        from langchain_core.messages import ToolMessage
+
         try:
-            content = tool_args.get("content", "")
-            context = tool_args.get("context", "")
-            memory_id = tool_args.get("memory_id")  # opcional, si None generamos nuevo
+            if tool_name == "save_patient_memory":
+                # ── Memoria tipada (estilo Claude Code) → guarda en patient_memories ──
+                from db import get_async_session
+                from services.patient_memory_service import PatientMemoryService
 
-            #Namespace: por defecto ("memories", user_id). Futuro: project_id
-            namespace = ("memories", user_id)
-            mem_id = memory_id or str(uuid.uuid4())
+                mem_type  = tool_args.get("type", "user")
+                mem_name  = tool_args.get("name", f"mem_{str(uuid.uuid4())[:8]}")
+                mem_desc  = tool_args.get("description", "")
+                mem_body  = tool_args.get("body", "")
 
-            value = {
-                "content": content,
-                "context": context,
-                "timestamp": datetime.now(tz=TIMEZONE).isoformat(),
-            }
+                async with get_async_session() as session:
+                    svc = PatientMemoryService(session)
+                    await svc.upsert(
+                        phone=user_id,
+                        type=mem_type,
+                        name=mem_name,
+                        description=mem_desc,
+                        body=mem_body,
+                    )
 
-            await vector_store.aput(namespace, key=mem_id, value=value)
+                logger.info(
+                    "save_patient_memory ejecutado",
+                    phone=user_id,
+                    type=mem_type,
+                    name=mem_name,
+                )
+                result_msg = f"Memoria '{mem_name}' ({mem_type}) guardada para {user_id}"
 
-            logger.info(
-                "Memoria guardada por node_execute_memory_tools",
-                user_id=user_id,
-                memory_id=mem_id,
-                content=content[:50],
-            )
+            else:
+                # ── Memoria vectorial legada → guarda en vector_store ─────────────
+                content   = tool_args.get("content", "")
+                context   = tool_args.get("context", "")
+                memory_id = tool_args.get("memory_id")
 
-            result_msg = f"Memoria guardada. ID: {mem_id}"
-            if memory_id:
-                result_msg = f"Memoria actualizada. ID: {mem_id}"
+                namespace = ("memories", user_id)
+                mem_id = memory_id or str(uuid.uuid4())
+                value = {
+                    "content": content,
+                    "context": context,
+                    "timestamp": datetime.now(tz=TIMEZONE).isoformat(),
+                }
 
-            from langchain_core.messages import ToolMessage
+                if vector_store:
+                    await vector_store.aput(namespace, key=mem_id, value=value)
+                    logger.info(
+                        "upsert_memory_arcadium ejecutado",
+                        user_id=user_id,
+                        memory_id=mem_id,
+                        content=content[:50],
+                    )
+                    result_msg = f"Memoria vectorial guardada. ID: {mem_id}"
+                else:
+                    result_msg = "vector_store no disponible — memoria no guardada"
 
             if tool_id:
-                tool_messages.append(
-                    ToolMessage(content=result_msg, tool_call_id=tool_id)
-                )
+                tool_messages.append(ToolMessage(content=result_msg, tool_call_id=tool_id))
             else:
                 logger.warning("Tool call sin id, omitiendo ToolMessage")
 
         except Exception as e:
             logger.error("Error en node_execute_memory_tools", error=str(e), exc_info=True)
             if tool_id:
-                from langchain_core.messages import ToolMessage
                 tool_messages.append(
                     ToolMessage(content=f"Error guardando memoria: {str(e)}", tool_call_id=tool_id)
                 )
