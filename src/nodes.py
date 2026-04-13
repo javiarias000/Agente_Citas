@@ -96,7 +96,11 @@ Tienes acceso a save_patient_memory para guardar información del paciente que p
                      Ej: name='ultima_cita_gcal', description='ID del último evento en Google Calendar',
                          body='Event ID: abc123. Servicio: ortodoncia. Fecha: 2026-04-13.'
 
-REGLA: No guardes datos que ya están en el estado del sistema (nombre, fecha, servicio de la cita actual).
+REGLAS CRÍTICAS:
+- Solo llama save_patient_memory cuando el paciente revele información NUEVA en su mensaje ACTUAL.
+- Si el dato ya aparece en el contexto o ya lo conocías de turnos anteriores: NO vuelvas a guardarlo.
+- Una memoria se guarda UNA sola vez. Si ya existe en el contexto del paciente, omite la llamada.
+- No guardes datos transitorios de la cita actual (nombre, fecha, servicio del agendamiento en curso).
 
 SITUACIÓN ACTUAL:
 {context}
@@ -239,10 +243,11 @@ async def node_entry(
                     if f in prev_state and prev_state[f] is not None:
                         updates[f] = prev_state[f]
 
-                # Solo restaurar si estamos en medio de un flujo (Turn 2+)
-                if prev_state.get("awaiting_confirmation"):
-                    # Si el usuario está iniciando un nuevo flujo de agendamiento,
-                    # limpiamos IDs de citas viejas para evitar que el LLM alucine.
+                # Campos de flujo — se restauran si la cita NO fue completada.
+                # confirmation_sent=True → flujo terminó, no restaurar para no contaminar
+                # uno nuevo. Si False/None → flujo en progreso (pidiendo campos faltantes,
+                # esperando confirmación, etc.) → restaurar contexto de booking completo.
+                if not prev_state.get("confirmation_sent"):
                     for f in [
                         "selected_service",
                         "service_duration",
@@ -251,16 +256,10 @@ async def node_entry(
                         "google_event_link",
                         "available_slots",
                         "selected_slot",
+                        "appointment_id",
+                        "google_event_id",
                     ]:
                         if f in prev_state and prev_state[f] is not None:
-                            updates[f] = prev_state[f]
-
-                    # Estos campos SOLO se restauran si NO estamos en un flujo de "agendar" nuevo
-                    # o si realmente necesitamos la cita anterior para cancelar/reagendar.
-                    # Por seguridad, los manejamos con cautela.
-                    for f in ["appointment_id", "google_event_id"]:
-                        if f in prev_state and prev_state[f] is not None:
-                            # Solo restaurar si no parece ser un flujo de agendamiento limpio
                             updates[f] = prev_state[f]
 
 
@@ -303,14 +302,30 @@ async def node_route_intent(state: ArcadiumState) -> Dict[str, Any]:
     """
     Detecta intención por keywords (determinista).
     Si no hay match suficiente → marca para fallback LLM.
+
+    FIX: Si el estado ya tiene un intent de la sesión en curso (flujo no terminado)
+    y el mensaje actual no aporta un intent diferente (ej. solo responde una pregunta),
+    conservar el intent existente para no romper el flujo multi-turno.
     """
     from src.intent_router import route_by_keywords
 
     text = _last_human_text(state)
-    intent = route_by_keywords(text)
+    detected = route_by_keywords(text)
+
+    # Si no detectamos intent nuevo pero ya hay uno del turno anterior, conservarlo.
+    # Condición: flujo no completado (confirmation_sent=False) y hay missing_fields.
+    existing_intent = state.get("intent")
+    if (
+        detected is None
+        and existing_intent
+        and existing_intent != "otro"
+        and not state.get("confirmation_sent")
+        and state.get("missing_fields")
+    ):
+        detected = existing_intent
 
     return {
-        "intent": intent,
+        "intent": detected,
         "current_step": "route_intent_done",
     }
 

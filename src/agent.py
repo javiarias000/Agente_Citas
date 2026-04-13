@@ -131,11 +131,12 @@ class ArcadiumAgent:
                     if f in prev_state and prev_state[f] is not None:
                         state[f] = prev_state[f]
 
-                # Campos transientes — solo se restauran si el turno anterior
-                # quedó esperando una confirmación (flujo en progreso).
-                # Si no estamos esperando nada, son datos de una cita ya
-                # completada en sesión anterior y no deben contaminar el contexto.
-                if prev_state.get("awaiting_confirmation"):
+                # Campos de flujo — se restauran si la cita NO fue completada.
+                # confirmation_sent=True significa que el flujo terminó (cita creada/cancelada).
+                # En ese caso, no restaurar para no contaminar un nuevo flujo.
+                # Si confirmation_sent=False/None, el flujo está en progreso (pidiendo campos,
+                # esperando confirmación, etc.) → restaurar todo el contexto de booking.
+                if not prev_state.get("confirmation_sent"):
                     for f in [
                         "selected_service",
                         "service_duration",
