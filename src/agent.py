@@ -168,7 +168,10 @@ class ArcadiumAgent:
             )
 
         # Invocar grafo
-        config = {"configurable": {"thread_id": self.session_id}}
+        # UUID por invocación: evita que add_messages acumule mensajes del checkpoint
+        # de sesiones anteriores. La historia real viene del store (limit=10 en node_entry).
+        invoke_thread_id = f"{self.session_id}_{uuid.uuid4().hex[:8]}"
+        config = {"configurable": {"thread_id": invoke_thread_id}}
         try:
             result = await self.graph.ainvoke(
                 state,

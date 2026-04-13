@@ -861,6 +861,16 @@ async def node_check_existing_appointment(
                 seen_ids.add(eid)
                 patient_events.append(ev)
 
+        # ── Filtrar eventos pasados ───────────────────────────────────────────
+        # Google Calendar API con q= ignora timeMin/timeMax en búsquedas de texto.
+        # Filtramos manualmente para que solo queden citas futuras.
+        future_events: list[Dict[str, Any]] = []
+        for ev in patient_events:
+            ev_start = _parse_event_start(ev, tz)
+            if ev_start is not None and ev_start > now:
+                future_events.append(ev)
+        patient_events = future_events
+
         # ── Sin coincidencia real → NO hay cita ──────────────────────────────
         # NOTA: El fallback que usaba all_events[:1] fue eliminado porque en una
         # clínica con múltiples pacientes causaba cancelar/reagendar la cita de
