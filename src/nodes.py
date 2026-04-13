@@ -510,15 +510,33 @@ async def node_detect_confirmation(state: ArcadiumState) -> Dict[str, Any]:
             result = "yes" if awaiting else "unknown"
 
     # ── Extracción de slot ───────────────────────────────────────────────────
+    available_slots = state.get("available_slots", [])
     selected_slot = None
+
     if result == "slot_choice":
-        available_slots = state.get("available_slots", [])
         # Para reagendar sin slots cargados: construir ISO desde fecha de referencia.
-        # El usuario incluyó la nueva hora en su primer mensaje ("a las 10 de la mañana").
         reference_date = None
         if not available_slots and ctype == "reschedule":
             reference_date = state.get("manana_fecha") or state.get("fecha_hoy")
         selected_slot = extract_slot_from_text(text, available_slots, reference_date)
+
+    elif result == "yes" and available_slots and ctype == "book":
+        # Usuario confirmó genéricamente ("sí") sin elegir slot específico.
+        # Elegir el slot disponible más cercano a datetime_preference.
+        dt_pref = state.get("datetime_preference")
+        if dt_pref:
+            from utils.date_utils import normalize_iso_datetime
+            pref_dt = normalize_iso_datetime(dt_pref)
+            if pref_dt:
+                def _slot_distance(s: str) -> float:
+                    slot_dt = normalize_iso_datetime(s)
+                    if slot_dt is None:
+                        return float("inf")
+                    # Comparar horas en naive para evitar problemas de tz
+                    pref_mins = pref_dt.hour * 60 + pref_dt.minute
+                    slot_mins = slot_dt.hour * 60 + slot_dt.minute
+                    return abs(slot_mins - pref_mins)
+                selected_slot = min(available_slots, key=_slot_distance)
 
     return {
         "confirmation_result": result,

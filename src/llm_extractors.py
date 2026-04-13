@@ -111,8 +111,8 @@ async def extract_intent_llm(
 _EXTRACT_DATA_SYSTEM = """\
 Eres un extractor de datos para agendar citas dentales.
 
-ZONA HORARIA: Ecuador (UTC-5). Las horas del contexto son locales.
-NUNCA uses UTC para evaluar si una hora ya pasó. Usa la hora_actual del contexto.
+ZONA HORARIA: Todas las horas son HORA LOCAL DE ECUADOR. NUNCA conviertas a UTC.
+Si el usuario dice "a las 10", el output es T10:00 — NO T15:00.
 
 INSTRUCCIONES:
 1. Extrae SOLO lo que el usuario dijo explícitamente. NO inventes.
@@ -129,10 +129,14 @@ INSTRUCCIONES:
    No requiere que se presente formalmente — basta con que haya respondido a la pregunta.
 5. Retorna SOLO JSON, sin markdown.
 
+REGLA CRÍTICA DE HORA: datetime_iso usa HORA LOCAL tal como la dijo el usuario.
+  Usuario: "a las 10" → "2026-04-14T10:00"  ✓
+  Usuario: "a las 10" → "2026-04-14T15:00"  ✗ (NO convertir a UTC)
+
 Formato de respuesta:
 {
   "service": "limpieza" | null,
-  "datetime_iso": "2026-04-10T15:00" | null,
+  "datetime_iso": "2026-04-14T10:00" | null,
   "patient_name": "Juan Pérez" | null,
   "confidence": 0.95,
   "needs_more_info": true,
