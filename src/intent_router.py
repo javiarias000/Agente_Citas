@@ -44,11 +44,18 @@ CONFIRM_YES = [
     "ok", "va", "bueno", "perfecto", "excelente", "yes",
     # Ecuatorianismos comunes
     "de una", "hágale", "hagale", "dale pues",
+    # Frases adicionales de confirmación
+    "listo", "de acuerdo", "acepto", "va bien", "está bien",
+    "esta bien", "me parece bien", "adelante", "cuando gusten",
+    "cuando puedan", "por favor", "procede", "sigue", "confirma",
+    "eso", "esa", "la primera", "la segunda", "la tercera", "esa hora",
+    "esa opcion", "esa opción",
 ]
 
 CONFIRM_NO = [
     "no", "mejor no", "no quiero", "no voy", "cancela",
     "olvidalo", "olvídalo", "mejor luego", "despues", "después",
+    "no gracias", "no por ahora", "en otro momento", "otro día",
 ]
 
 

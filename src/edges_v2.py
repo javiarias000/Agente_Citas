@@ -2,7 +2,7 @@
 Edges del grafo V2 (arquitectura ReAct).
 
 Routing puro — lee estado, retorna string, nunca muta.
-El grafo V2 tiene solo 5 nodos, por eso los edges son triviales.
+El grafo V2 tiene 6 nodos (entry, interceptor, react, execute, format, save).
 """
 
 from __future__ import annotations
@@ -10,6 +10,18 @@ from __future__ import annotations
 from src.state import ArcadiumState
 
 MAX_TOOL_ITERATIONS = 6
+
+
+def edge_after_interceptor(state: ArcadiumState) -> str:
+    """
+    Después de node_confirmation_interceptor:
+    - Si el interceptor inyectó pending_tool_calls → ejecutar tools directamente
+    - Si no → pasar al LLM (react_loop)
+    """
+    pending = state.get("pending_tool_calls", [])
+    if pending:
+        return "execute_tools"
+    return "react_loop"
 
 
 def edge_after_react(state: ArcadiumState) -> str:

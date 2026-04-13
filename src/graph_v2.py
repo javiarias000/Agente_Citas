@@ -18,7 +18,8 @@ from typing import Any, Dict, Optional
 import structlog
 from langgraph.graph import END, START, StateGraph
 
-from src.edges_v2 import edge_after_execute_tools, edge_after_react
+from src.confirmation_interceptor import node_confirmation_interceptor
+from src.edges_v2 import edge_after_execute_tools, edge_after_interceptor, edge_after_react
 from src.nodes_v2 import (
     node_entry_v2,
     node_execute_tools,
@@ -79,27 +80,39 @@ def build_graph_v2(
     # Nodo 1: entry
     graph.add_node("entry_v2", partial(node_entry_v2, store=store))
 
-    # Nodo 2: react_loop (única LLM call por iteración)
+    # Nodo 2: confirmation_interceptor (determinista — sin LLM)
+    graph.add_node("confirmation_interceptor", node_confirmation_interceptor)
+
+    # Nodo 3: react_loop (única LLM call por iteración)
     graph.add_node(
         "react_loop",
         partial(node_react_loop, llm_with_tools=llm_with_tools),
     )
 
-    # Nodo 3: execute_tools (ejecuta todos los pending tool_calls)
+    # Nodo 4: execute_tools (ejecuta todos los pending tool_calls)
     graph.add_node(
         "execute_tools",
         partial(node_execute_tools, tool_map=tool_map),
     )
 
-    # Nodo 4: format_response (determinista para éxito, LLM para el resto)
+    # Nodo 5: format_response (determinista para éxito, LLM para el resto)
     graph.add_node("format_response", node_format_response)
 
-    # Nodo 5: save_state
+    # Nodo 6: save_state
     graph.add_node("save_state_v2", partial(node_save_state_v2, store=store))
 
     # ── Edges ──────────────────────────────────────────────────────────────────
     graph.add_edge(START, "entry_v2")
-    graph.add_edge("entry_v2", "react_loop")
+    graph.add_edge("entry_v2", "confirmation_interceptor")
+
+    graph.add_conditional_edges(
+        "confirmation_interceptor",
+        edge_after_interceptor,
+        {
+            "execute_tools": "execute_tools",
+            "react_loop": "react_loop",
+        },
+    )
 
     graph.add_conditional_edges(
         "react_loop",

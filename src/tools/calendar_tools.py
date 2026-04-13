@@ -233,6 +233,34 @@ def make_book_appointment_tool(calendar_service, db_service):
             duration = SERVICE_DURATIONS.get(service, 30)
             end_dt = dt + timedelta(minutes=duration)
 
+            # R2 — Re-verificar disponibilidad antes de crear evento.
+            # El slot puede haberse tomado entre que se mostró al paciente y que confirmó.
+            try:
+                fresh_slots = await calendar_service.get_available_slots(
+                    date=dt, duration_minutes=duration
+                )
+                time_key = f"T{dt.hour:02d}:{dt.minute:02d}"
+                if fresh_slots and not any(time_key in s for s in fresh_slots):
+                    logger.warning(
+                        "book_appointment: slot ya no disponible",
+                        slot=slot_iso,
+                        fresh_slots=fresh_slots[:4],
+                    )
+                    alternatives = ", ".join(
+                        s[11:16] for s in fresh_slots[:3]
+                    ) if fresh_slots else "ninguno"
+                    return BookAppointmentResult(
+                        success=False,
+                        error=(
+                            f"El horario de las {dt.strftime('%H:%M')} ya fue tomado. "
+                            f"Horarios disponibles: {alternatives}. "
+                            "Por favor elija otro."
+                        ),
+                    )
+            except Exception as e:
+                # Si falla la re-verificación, continuar con el intento de booking
+                logger.warning("book_appointment: error en re-verificación (continuando)", error=str(e))
+
             logger.info(
                 "book_appointment: llamando create_event",
                 patient=patient_name,
@@ -485,11 +513,6 @@ def make_reschedule_appointment_tool(calendar_service, db_service):
             )
 
         try:
-            # 1. Eliminar evento viejo
-            await calendar_service.delete_event(event_id)
-            logger.info("reschedule_appointment: evento viejo eliminado", event_id=event_id)
-
-            # 2. Crear evento nuevo
             dt = datetime.fromisoformat(new_slot_iso)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=TIMEZONE)
@@ -497,6 +520,9 @@ def make_reschedule_appointment_tool(calendar_service, db_service):
             duration = SERVICE_DURATIONS.get(service, 30)
             end_dt = dt + timedelta(minutes=duration)
 
+            # R1 — Create-before-Delete: crear nuevo evento PRIMERO.
+            # Si la creación falla, el evento viejo sigue intacto (no se pierde la cita).
+            # Solo se elimina el viejo después de confirmar que el nuevo existe.
             new_event_id, new_event_link = await calendar_service.create_event(
                 start=dt,
                 end=end_dt,
@@ -507,7 +533,7 @@ def make_reschedule_appointment_tool(calendar_service, db_service):
             if not new_event_id:
                 return RescheduleAppointmentResult(
                     success=False,
-                    error="Error creando nueva cita en Google Calendar.",
+                    error="Error creando nueva cita en Google Calendar. La cita anterior sigue vigente.",
                 )
 
             logger.info(
@@ -515,6 +541,20 @@ def make_reschedule_appointment_tool(calendar_service, db_service):
                 new_event_id=new_event_id,
                 new_slot=new_slot_iso,
             )
+
+            # Eliminar evento viejo solo después de confirmar que el nuevo existe
+            try:
+                await calendar_service.delete_event(event_id)
+                logger.info("reschedule_appointment: evento viejo eliminado", event_id=event_id)
+            except Exception as del_err:
+                # El nuevo evento ya existe — el paciente tiene su cita.
+                # El viejo queda huérfano pero no se pierde nada crítico.
+                logger.warning(
+                    "reschedule_appointment: error eliminando evento viejo (nuevo evento OK)",
+                    old_event_id=event_id,
+                    new_event_id=new_event_id,
+                    error=str(del_err),
+                )
 
             return RescheduleAppointmentResult(
                 success=True,

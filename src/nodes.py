@@ -1120,15 +1120,47 @@ async def node_reschedule_appointment(
     old_appt_id = state.get("appointment_id")
 
     try:
-        # 1. Cancelar evento anterior en Google Calendar
+        dt = datetime.fromisoformat(new_slot)
+        duration = state.get("service_duration", 30)
+        end_dt = dt + timedelta(minutes=duration)
+        patient = state.get("patient_name", "Paciente")
+        service = state.get("selected_service", "consulta")
+
+        # 1. Crear nuevo evento en Google Calendar PRIMERO (R1 — Create-before-Delete).
+        # Si falla la creación, el evento viejo sigue intacto. No se pierde la cita.
+        new_event_id = None
+        new_event_link = None
+        if calendar_service:
+            new_event_id, new_event_link = await calendar_service.create_event(
+                start=dt,
+                end=end_dt,
+                title=f"{service} - {patient}",
+                description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
+            )
+
+        if not new_event_id:
+            return {
+                "last_error": "Error creando nuevo evento en Calendar. La cita anterior sigue vigente.",
+                "should_escalate": True,
+            }
+
+        logger.info("Nuevo evento creado antes de eliminar viejo", new_event_id=new_event_id)
+
+        # 2. Cancelar evento anterior en Google Calendar (solo si nuevo existe)
         if calendar_service and old_event_id:
             try:
                 await calendar_service.delete_event(old_event_id)
                 logger.info("Evento anterior eliminado", event_id=old_event_id)
             except Exception as e:
-                logger.warning("Error cancelando evento anterior en Calendar", error=str(e))
+                # Nuevo evento ya existe — paciente tiene su cita. Viejo queda huérfano.
+                logger.warning(
+                    "Error eliminando evento anterior (nuevo evento OK)",
+                    old_event_id=old_event_id,
+                    new_event_id=new_event_id,
+                    error=str(e),
+                )
 
-        # 2. Cancelar cita anterior en DB
+        # 3. Cancelar cita anterior en DB
         if db_service and old_appt_id:
             try:
                 import uuid as _uuid
@@ -1138,24 +1170,6 @@ async def node_reschedule_appointment(
                 )
             except Exception as e:
                 logger.warning("Error cancelando cita anterior en DB", error=str(e))
-
-        # 3. Crear nuevo evento en Google Calendar
-        dt = datetime.fromisoformat(new_slot)
-        duration = state.get("service_duration", 30)
-        end_dt = dt + timedelta(minutes=duration)
-        patient = state.get("patient_name", "Paciente")
-        service = state.get("selected_service", "consulta")
-
-        new_event_id = None
-        new_event_link = None
-        if calendar_service:
-            # FIX: create_event retorna tuple[str, str]. Kwargs: start/end (no start_time/end_time).
-            new_event_id, new_event_link = await calendar_service.create_event(
-                start=dt,
-                end=end_dt,
-                title=f"{service} - {patient}",
-                description=f"Paciente: {patient}\nTeléfono: {state.get('phone_number', '')}",
-            )
 
         # 4. Crear nueva cita en DB
         new_appt_id = None
