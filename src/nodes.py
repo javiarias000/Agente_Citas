@@ -116,7 +116,14 @@ def _last_human_text(state: ArcadiumState) -> str:
     """Extrae el texto del último mensaje humano."""
     for msg in reversed(state.get("messages", [])):
         if isinstance(msg, HumanMessage) or getattr(msg, "type", None) == "human":
-            return msg.content
+            content = msg.content
+            # Studio / multimodal envía content como lista de bloques
+            if isinstance(content, list):
+                return " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            return content or ""
     return ""
 
 
@@ -204,7 +211,7 @@ async def node_entry(
 
     new_message = HumanMessage(content=incoming)
 
-    if store:
+    if store and hasattr(store, "get_history"):
         try:
             phone = state.get("phone_number", "")
 
@@ -398,6 +405,13 @@ async def node_check_availability(
             duration_minutes=duration,
         )
 
+        logger.info(
+            "node_check_availability: raw slots del calendar",
+            date=dt.date().isoformat(),
+            slots_count=len(slots),
+            first_slot=str(slots[0]) if slots else "ninguno",
+        )
+
         # Hora actual en Ecuador para filtrar slots ya pasados
         now_ec = datetime.now(TIMEZONE)
 
@@ -484,13 +498,16 @@ async def node_detect_confirmation(state: ArcadiumState) -> Dict[str, Any]:
 
     # ── Override para cancelar ───────────────────────────────────────────────
     # "cancela mi cita" devuelve "no" porque "cancela" está en CONFIRM_NO.
-    # Pero en el flujo de cancelación, esas palabras expresan INTENCIÓN, no rechazo.
-    # → tratarlas como "unknown" para que generate_response pida confirmación explícita.
+    # Pero en el flujo de cancelación (awaiting_confirmation=True), esas palabras
+    # expresan CONFIRMACIÓN de la operación ya anunciada, no rechazo.
+    # → tratarlas como "yes" para ejecutar la cancelación.
+    # Si awaiting_confirmation=False, son una nueva intención → "unknown".
     if ctype == "cancel" and result == "no":
         intent_cancel_words = ["cancela", "cancelo", "anula", "anulo", "desagendar"]
         text_lower = text.lower()
         if any(kw in text_lower for kw in intent_cancel_words):
-            result = "unknown"
+            awaiting = state.get("awaiting_confirmation", False)
+            result = "yes" if awaiting else "unknown"
 
     # ── Extracción de slot ───────────────────────────────────────────────────
     selected_slot = None
@@ -1272,7 +1289,9 @@ async def node_save_state(
     Persiste el estado actual en DB a través del store.
     Guarda mensajes nuevos y actualiza user_profiles.
     """
-    if not store:
+    # Guard: LangGraph inyecta su BatchedStore cuando el param se llama "store".
+    # Si el store no tiene nuestros métodos custom, saltar silenciosamente.
+    if not store or not hasattr(store, "save_agent_state"):
         return {}
 
     try:
@@ -2025,6 +2044,18 @@ async def node_generate_response_with_tools(
             context_parts.append(extra_section)
 
 
+    # ── GUARD CRÍTICO: confirmation_result ───────────────────────────────
+    # Se evalúa ANTES del razonamiento para cortar cualquier alucinación.
+    confirmation_result = state.get("confirmation_result")
+    if confirmation_result == "unknown" and not confirmation_sent:
+        context_parts.append(
+            "⚠️ ALERTA CRÍTICA: El sistema detectó que la última respuesta del usuario "
+            "NO fue una confirmación clara (resultado: 'desconocido'). "
+            "PROHIBIDO ABSOLUTO: decir 'cancelada', 'agendada', 'exitosamente', '✅' o cualquier frase "
+            "que implique que una operación fue completada. "
+            "ACCIÓN OBLIGATORIA: Pide al usuario que confirme explícitamente con 'sí' o 'no'."
+        )
+
     # ── PASOS DE RAZONAMIENTO (Estilo n8n) ──────────────────────────────
     # Obligamos al LLM a seguir un proceso estructurado antes de responder.
     context_parts.append(
@@ -2035,9 +2066,9 @@ async def node_generate_response_with_tools(
         "PASO 2 - REVISIÓN DE HISTORIAL: Lee los mensajes anteriores SOLO para entender qué pidió el cliente "
         "en este turno. Si el historial contradice el JSON del sistema, el JSON SIEMPRE gana.\n"
         "PASO 3 - RAZONAMIENTO (Think): ¿confirmation_sent es True? → la operación SÍ se ejecutó. "
-        "¿google_event_id existe? → el evento SÍ está en Google Calendar. No importa qué diga el historial.\n"
-        "PASO 4 - VALIDACIÓN DE SALIDA: Si el usuario pidió agendar/reagendar y no hay un google_event_id confirmado, "
-        "está PROHIBIDO decir que la cita fue creada. Pide la info faltante o informa que estás procesando.\n"
+        "¿confirmation_sent es False? → NINGUNA operación fue ejecutada, sin importar qué diga el historial.\n"
+        "PASO 4 - VALIDACIÓN DE SALIDA: Si confirmation_sent=False, está PROHIBIDO decir que una cita "
+        "fue creada, cancelada o reagendada. Si confirmation_result='unknown', pide confirmación de nuevo.\n"
         "PASO 5 - RESPUESTA: Responde de forma amable, corta (máx 3-4 líneas) y basada solo en la verdad del sistema."
     )
 

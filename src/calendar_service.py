@@ -11,10 +11,7 @@ import structlog
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    from backports.zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from googleapiclient.errors import HttpError
@@ -64,9 +61,12 @@ class GoogleCalendarService:
                     iso_slots.append(start.isoformat())
                 elif isinstance(start, str):
                     iso_slots.append(start)
+            print(f"[calendar] slots raw={len(slots)} iso={len(iso_slots)} date={date.date()}")
             logger.info("Slots disponibles", date=date.date().isoformat(), count=len(iso_slots))
             return iso_slots
         except Exception as e:
+            import traceback
+            print(f"[calendar] ERROR get_available_slots: {e}\n{traceback.format_exc()}")
             logger.error("Error obteniendo slots", error=str(e))
             return []
 

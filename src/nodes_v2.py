@@ -62,7 +62,7 @@ async def node_entry_v2(state: ArcadiumState, *, store=None) -> Dict[str, Any]:
 
     # ── Historial desde store ─────────────────────────────────────────────────
     history: List = []
-    if store and phone:
+    if store and phone and hasattr(store, "get_history"):
         try:
             history = await store.get_history(phone) or []
             history = history[-MAX_HISTORY_MESSAGES:]
@@ -70,7 +70,7 @@ async def node_entry_v2(state: ArcadiumState, *, store=None) -> Dict[str, Any]:
             logger.warning("node_entry_v2: error cargando historial", error=str(e))
 
     # ── Restaurar estado previo ────────────────────────────────────────────────
-    if store and phone:
+    if store and phone and hasattr(store, "get_agent_state"):
         try:
             prev = await store.get_agent_state(phone) or {}
             for field in [
@@ -503,7 +503,7 @@ async def node_save_state_v2(state: ArcadiumState, *, store=None) -> Dict[str, A
     Persiste los campos no transientes del estado.
     Guarda el último mensaje del agente en el historial.
     """
-    if not store:
+    if not store or not hasattr(store, "save_agent_state"):
         return {}
 
     phone = state.get("phone_number", "")
