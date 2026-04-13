@@ -151,6 +151,11 @@ class ArcadiumAPI:
         self._rate_limit: Dict[str, list] = {}
         self._rate_limit_max = 30  # max mensajes por minuto por phone
 
+        # Session locks: serializa requests concurrentes del mismo número.
+        # Sin esto, dos mensajes del mismo usuario que llegan con <2s de diferencia
+        # se procesan en paralelo, leen el mismo estado, y sobreescriben datos.
+        self._session_locks: Dict[str, asyncio.Lock] = {}
+
         # Stores para LangGraph (se inicializan en _init_langgraph)
         self.state_store = None  # Store para historial y estado (BaseStore)
         self.vector_store = (
@@ -847,17 +852,19 @@ class ArcadiumAPI:
 
                 # FIX: process_message solo recibe el mensaje (sin context_vars)
                 # FIX: timeout también en WhatsApp
-                try:
-                    raw = await asyncio.wait_for(
-                        agent.process_message(message_data["message"]), timeout=30.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.error("Timeout procesando mensaje WhatsApp", sender=sender)
-                    return {
-                        "status": "error",
-                        "response": "Disculpe, estoy teniendo dificultades técnicas. Por favor intente de nuevo o llame a la clínica. 📞",
-                        "session_id": sender,
-                    }
+                # FIX: lock por sesión — serializa mensajes concurrentes del mismo número
+                async with self._get_session_lock(sender):
+                    try:
+                        raw = await asyncio.wait_for(
+                            agent.process_message(message_data["message"]), timeout=30.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error("Timeout procesando mensaje WhatsApp", sender=sender)
+                        return {
+                            "status": "error",
+                            "response": "Disculpe, estoy teniendo dificultades técnicas. Por favor intente de nuevo o llame a la clínica. 📞",
+                            "session_id": sender,
+                        }
 
                 # FIX: normalizar resultado — AgentResponse o dict
                 result = _normalize_agent_result(raw)
@@ -985,16 +992,18 @@ class ArcadiumAPI:
                 )
 
                 # FIX: timeout en Chatwoot (igual que WhatsApp)
-                try:
-                    raw = await asyncio.wait_for(
-                        agent.process_message(webhook_data["content"]), timeout=30.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(
-                        "Timeout procesando mensaje Chatwoot",
-                        contact=normalized_contact,
-                    )
-                    return {"status": "error", "reason": "Agent timeout"}
+                # FIX: lock por sesión — serializa mensajes concurrentes del mismo número
+                async with self._get_session_lock(normalized_contact):
+                    try:
+                        raw = await asyncio.wait_for(
+                            agent.process_message(webhook_data["content"]), timeout=30.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "Timeout procesando mensaje Chatwoot",
+                            contact=normalized_contact,
+                        )
+                        return {"status": "error", "reason": "Agent timeout"}
 
                 # FIX: normalizar resultado
                 result = _normalize_agent_result(raw)
@@ -1179,6 +1188,18 @@ class ArcadiumAPI:
     # ============================================
     # Agentes
     # ============================================
+
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """
+        Retorna (o crea) el Lock asyncio para una sesión dada.
+
+        Serializa requests concurrentes del mismo número. Sin esto, dos mensajes
+        del mismo usuario que llegan con <2s de diferencia se procesan en paralelo,
+        leen el mismo estado pre-booking, y producen respuestas inconsistentes.
+        """
+        if session_id not in self._session_locks:
+            self._session_locks[session_id] = asyncio.Lock()
+        return self._session_locks[session_id]
 
     async def _get_or_create_agent(
         self,

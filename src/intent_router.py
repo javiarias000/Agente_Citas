@@ -20,6 +20,10 @@ INTENT_KEYWORDS: Dict[str, List[str]] = {
         "turno", "me duele", "dolor de",
         "limpieza", "consulta", "revision", "revisar",
         "quiero ir", "necesito ir",
+        # Frases naturales con "cita"
+        "cita", "una cita", "quiero cita", "necesito cita",
+        "quiero una cita", "necesito una cita", "sacar cita",
+        "pedir cita", "solicitar cita", "hacer cita",
     ],
     "cancelar": [
         "cancelar", "cancelo", "cancela", "cancelar cita",

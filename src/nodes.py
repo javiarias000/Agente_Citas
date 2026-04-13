@@ -814,17 +814,33 @@ async def node_check_existing_appointment(
             except ValueError:
                 pass  # dt_pref con formato inválido — se ignora sin romper el flujo
 
-        # ── Estrategia 1: list_events completo → filtro local por teléfono ────
-        all_events = await calendar_service.list_events(
-            start_date=now,
-            end_date=future,
-            max_results=50,
-        )
-
-        found_by_phone = [
-            ev for ev in all_events
-            if phone and _phone_in_text(phone, ev.get("description") or "")
-        ]
+        # ── Estrategia 1: búsqueda por teléfono vía search_events_by_query ────
+        # list_events no existe en el wrapper — search_events_by_query hace búsqueda
+        # de texto libre que encuentra el teléfono almacenado en la descripción del evento.
+        all_events: list = []
+        found_by_phone: list = []
+        if phone:
+            try:
+                # Buscar con el número normalizado y sin "+" para mayor cobertura
+                phone_results = await calendar_service.search_events_by_query(
+                    q=phone,
+                    start_date=now,
+                    end_date=future,
+                )
+                # También buscar sin el prefijo "+" por si fue guardado así
+                phone_nplus = phone.lstrip("+")
+                if phone_nplus != phone:
+                    phone_results2 = await calendar_service.search_events_by_query(
+                        q=phone_nplus,
+                        start_date=now,
+                        end_date=future,
+                    )
+                    # Deduplicar
+                    seen = {ev.get("id") for ev in phone_results}
+                    phone_results += [ev for ev in phone_results2 if ev.get("id") not in seen]
+                found_by_phone = phone_results
+            except Exception as e:
+                logger.warning("node_check_existing_appointment: error búsqueda por teléfono", error=str(e))
 
         # ── Estrategia 2: búsqueda por nombre vía API de Google (q=) ─────────
         # Solo si hay nombre con suficientes caracteres para evitar resultados ruido.
@@ -1011,10 +1027,11 @@ async def node_lookup_appointment(
         now = datetime.now(tz)
         future = now + timedelta(days=60)
 
-        events = await calendar_service.list_events(
+        # list_events no existe en el wrapper — usar search_events_by_query
+        events = await calendar_service.search_events_by_query(
+            q=phone,
             start_date=now,
             end_date=future,
-            max_results=50,
         )
 
         # Buscar eventos que contengan el teléfono del cliente en la descripción
@@ -1365,9 +1382,26 @@ async def node_extract_data(
     updates: Dict[str, Any] = {}
     updates["_extract_data_calls"] = prev_calls + 1
 
+    existing_service = state.get("selected_service")
     if data.get("service"):
         svc = data["service"]
         svc_lower = svc.lower().strip()
+
+        # Guard contra sobreescritura: si ya hay servicio confirmado y el LLM extrae
+        # un servicio diferente sin que el usuario lo haya mencionado explícitamente
+        # en el mensaje actual, conservar el servicio original.
+        # El LLM a veces "inventa" el servicio basado en el historial cuando re-extrae.
+        if existing_service and existing_service != svc_lower:
+            last_msg = _last_human_text(state).lower()
+            service_mentioned_in_msg = any(svc_kw in last_msg for svc_kw in VALID_SERVICES)
+            if not service_mentioned_in_msg:
+                logger.info(
+                    "node_extract_data: ignorando cambio de servicio (no mencionado en msg)",
+                    existing=existing_service,
+                    extracted=svc_lower,
+                )
+                svc_lower = existing_service
+
         if svc_lower in VALID_SERVICES:
             updates["selected_service"] = svc_lower
             updates["service_duration"] = VALID_SERVICES[svc_lower]
