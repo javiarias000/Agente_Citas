@@ -120,6 +120,7 @@ INSTRUCCIONES:
    - "mañana" = manana_fecha del contexto
    - "pasado mañana" = manana_fecha + 1 día
    - "el viernes" = la próxima fecha que sea viernes (usa fecha_hoy como referencia)
+   - SIN FECHA EXPLÍCITA (solo hora): Asumir FECHA_HOY para nuevas citas. Ej: usuario dice "las 5 de la tarde" → usar fecha_hoy
 3. El servicio debe coincidir con uno de: consulta, limpieza, empaste,
    extraccion, endodoncia, ortodoncia, cirugia, implantes, estetica,
    odontopediatria, blanqueamiento, revision.
@@ -129,9 +130,11 @@ INSTRUCCIONES:
    No requiere que se presente formalmente — basta con que haya respondido a la pregunta.
 5. Retorna SOLO JSON, sin markdown.
 
-REGLA CRÍTICA DE HORA: datetime_iso usa HORA LOCAL tal como la dijo el usuario.
-  Usuario: "a las 10" → "2026-04-14T10:00"  ✓
-  Usuario: "a las 10" → "2026-04-14T15:00"  ✗ (NO convertir a UTC)
+REGLA CRÍTICA DE HORA Y FECHA:
+  Usuario: "a las 10" (sin fecha) → usar fecha_hoy. Si fecha_hoy="2026-04-15" → "2026-04-15T10:00"
+  Usuario: "para mañana a las 5" → usar manana_fecha. Si manana_fecha="2026-04-16" → "2026-04-16T17:00"
+  Usuario: "para hoy a las 10" → "2026-04-15T10:00"
+  Hora es HORA LOCAL, NO UTC: "a las 10" → T10:00, NO T15:00
 
 Formato de respuesta:
 {
