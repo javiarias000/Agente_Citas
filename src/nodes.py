@@ -653,6 +653,8 @@ async def node_book_appointment(
             # confirmation_sent=True SOLO cuando google_event_id está confirmado
             "confirmation_sent": True,
             "current_step": "resolution",
+            # Registrar el slot que se agendó (para contexto del LLM en respuesta)
+            "selected_slot": slot,
             # Limpiar estado de selección para no reutilizar en próximos turnos
             "awaiting_confirmation": False,
             "available_slots": [],
