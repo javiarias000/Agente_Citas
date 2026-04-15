@@ -171,6 +171,7 @@ TRANSIENT_FIELDS: Set[str] = {
     "calendar_appointment_found",
     "existing_appointments",  # lista de citas encontradas (se recalcula cada turno)
     "rebook_after_cancel",  # flag transitorio para flujo cancel+rebook
+    "_slots_checked",  # True solo si node_check_availability corrió este turno
 }
 
 
@@ -246,6 +247,7 @@ class ArcadiumState(TypedDict, total=False):
     _extract_data_calls: int
     _history_len: int       # mensajes pre-existentes en el store al inicio del turno
     _tool_iterations: int
+    _slots_checked: bool    # True si node_check_availability corrió en este turno
 
 
 # ═══════════════════════════════════════════════════════════

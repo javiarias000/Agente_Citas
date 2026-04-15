@@ -200,6 +200,7 @@ async def node_entry(
         "conversation_turns": state.get("conversation_turns", 0) + 1,
         "_extract_data_calls": 0,
         "_tool_iterations": 0,
+        "_slots_checked": False,  # se activa solo cuando node_check_availability corre
     }
 
     # Obtener el mensaje nuevo desde _incoming_message (enviado por agent.py)
@@ -425,6 +426,7 @@ async def node_check_availability(
         if not slots_iso:
             return {
                 "available_slots": [],
+                "_slots_checked": True,  # check_availability corrió; no había slots
                 "last_error": "No hay slots disponibles para esa fecha. Por favor elija otra fecha u horario.",
             }
 
@@ -438,6 +440,7 @@ async def node_check_availability(
 
         return {
             "available_slots": slots_iso,
+            "_slots_checked": True,  # check_availability corrió; hay slots disponibles
             "current_step": "awaiting_selection",
             # Marcar que esperamos selección → el siguiente turno va a detect_confirmation
             "awaiting_confirmation": True,
@@ -446,6 +449,7 @@ async def node_check_availability(
     except Exception as e:
         return {
             "available_slots": [],
+            "_slots_checked": True,  # corrió pero falló
             "last_error": f"Error consultando disponibilidad: {e}",
         }
 
@@ -1783,11 +1787,15 @@ async def node_generate_response_with_tools(
                 "PROHIBIDO confirmar cualquier horario. Debes informar que estás verificando "
                 "la disponibilidad y esperar a que el sistema proporcione los slots."
             )
-        elif not slots and not (lookup_done and not cal_found):
+        elif not slots and state.get("_slots_checked", False):
+            # BLOQUEO solo cuando node_check_availability corrió Y no encontró slots.
+            # Condición anterior usaba cal_found para inferir "no slots", pero eso
+            # dispara incorrectamente cuando hay una cita en OTRO día (cal_found=True,
+            # slots=[], pero check_availability nunca corrió para el día solicitado).
             context_parts.append(
-                "🚫 BLOQUEO DE RESPUESTA: El calendario no devolvió slots disponibles. "
-                "NO inventes horarios. Informa que no hay disponibilidad en este momento "
-                "y sugiere otro día o servicio."
+                "🚫 BLOQUEO DE RESPUESTA: El calendario no devolvió slots disponibles para la fecha solicitada. "
+                "NO inventes horarios. Informa que no hay disponibilidad en ese horario "
+                "y sugiere otro día o franja horaria."
             )
         elif not confirmation_sent:
             # EL CASO CRÍTICO: Hay slots, pero NO se ha ejecutado el booking.
