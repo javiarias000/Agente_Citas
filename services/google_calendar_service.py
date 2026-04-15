@@ -345,7 +345,8 @@ class GoogleCalendarService:
 
         available_slots = []
         current = day_start
-        while current < day_end:
+        # Validar que el slot COMPLETO cabe dentro del horario de atención
+        while current + timedelta(minutes=duration_minutes) <= day_end:
             if current not in busy_slots:
                 available_slots.append(
                     {
