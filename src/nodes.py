@@ -1731,6 +1731,7 @@ async def node_generate_response_with_tools(
 
     # ✅ slots disponibles — mostrar los 4 más cercanos a la hora solicitada
     slots = context_dict.get("availability", {}).get("slots_available", [])
+    exact_match = None  # Inicializar para evitar UnboundLocalError
     if slots:
         preferred_slots = slots
         # --- LÓGICA DE COMPARACIÓN DE SLOTS ---
