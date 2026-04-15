@@ -21,7 +21,7 @@ class SlotInfo(BaseModel):
 class CheckAvailabilityResult(BaseModel):
     success: bool
     slots: List[SlotInfo] = Field(default_factory=list)
-    duration_minutes: int = 30
+    duration_minutes: int = 60
     date_adjusted: bool = False   # True si sábado/domingo → lunes
     error: Optional[str] = None
 

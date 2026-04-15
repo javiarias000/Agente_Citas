@@ -43,7 +43,7 @@ class GoogleCalendarService:
     async def get_available_slots(
         self,
         date: datetime,
-        duration_minutes: int = 30,
+        duration_minutes: int = 60,
     ) -> List[str]:
         """Retorna lista de ISO strings de slots disponibles para esa fecha."""
         try:

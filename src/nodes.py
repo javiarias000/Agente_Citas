@@ -39,6 +39,7 @@ from src.llm_extractors import (
     extract_intent_llm,
     generate_deyy_response,
 )
+from config.calendar_mapping import get_email_for_short_key
 from memory_agent_integration.memory_tools import upsert_memory_arcadium, save_patient_memory
 from agents.langchain_compat import create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -53,6 +54,21 @@ from src.state import (
 )
 
 logger = structlog.get_logger("langgraph.nodes")
+
+
+# ═══════════════════════════════════════════════════════════
+# ROUTING HELPER
+# ═══════════════════════════════════════════════════════════
+
+def _resolve_calendar_service(state: ArcadiumState, calendar_services=None, calendar_service=None):
+    """Selecciona el calendario correcto según doctor_email en el estado."""
+    if calendar_services and isinstance(calendar_services, dict):
+        doctor_email = state.get("doctor_email")
+        if doctor_email and doctor_email in calendar_services:
+            return calendar_services[doctor_email]
+        # Fallback: primer servicio disponible en el dict
+        return next(iter(calendar_services.values()), calendar_service)
+    return calendar_service
 
 
 # ═══════════════════════════════════════════════════════════
@@ -348,6 +364,7 @@ async def node_check_availability(
     state: ArcadiumState,
     *,
     calendar_service=None,
+    calendar_services=None,
 ) -> Dict[str, Any]:
     """
     Consulta slots disponibles vía Google Calendar.
@@ -355,8 +372,9 @@ async def node_check_availability(
     y compatibles con extract_slot_from_text.
     Sin LLM.
     """
+    calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     dt_iso = state.get("datetime_preference")
-    duration = state.get("service_duration", 30)
+    duration = state.get("service_duration", 60)
 
     if not dt_iso or not calendar_service:
         return {
@@ -549,6 +567,7 @@ async def node_book_appointment(
     state: ArcadiumState,
     *,
     calendar_service=None,
+    calendar_services=None,
     db_service=None,
 ) -> Dict[str, Any]:
     """
@@ -558,11 +577,13 @@ async def node_book_appointment(
     INVARIANTE CRÍTICO: NUNCA retorna confirmation_sent=True si google_event_id es None.
     Si no hay evento en Calendar, retorna error. El LLM NO debe confirmar citas falsas.
     """
+    calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     logger.info(
         "[node_book_appointment] iniciando",
         phone=state.get("phone_number", ""),
         service=state.get("selected_service", ""),
         slot=state.get("selected_slot") or state.get("datetime_preference", ""),
+        doctor_email=state.get("doctor_email", ""),
         has_calendar_service=calendar_service is not None,
     )
 
@@ -584,7 +605,7 @@ async def node_book_appointment(
 
     try:
         dt = datetime.fromisoformat(slot)
-        duration = state.get("service_duration", 30)
+        duration = state.get("service_duration", 60)
         end_dt = dt + timedelta(minutes=duration)
 
         patient = state.get("patient_name", "Paciente")
@@ -1245,12 +1266,14 @@ async def node_reschedule_appointment(
     state: ArcadiumState,
     *,
     calendar_service=None,
+    calendar_services=None,
     db_service=None,
 ) -> Dict[str, Any]:
     """
     Reagenda una cita: cancela el evento anterior y crea uno nuevo.
     DETERMINISTA — cero llamadas al LLM.
     """
+    calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     new_slot = state.get("selected_slot") or state.get("datetime_preference")
     if not new_slot:
         return {"last_error": "No hay nuevo slot para reagendar"}
@@ -1260,7 +1283,7 @@ async def node_reschedule_appointment(
 
     try:
         dt = datetime.fromisoformat(new_slot)
-        duration = state.get("service_duration", 30)
+        duration = state.get("service_duration", 60)
         end_dt = dt + timedelta(minutes=duration)
         patient = state.get("patient_name", "Paciente")
         service = state.get("selected_service", "consulta")
@@ -1493,13 +1516,33 @@ async def node_extract_data(
                     break
             else:
                 updates["selected_service"] = svc_lower
-                updates["service_duration"] = 30
+                updates["service_duration"] = 60
 
     if data.get("datetime_iso"):
         updates["datetime_preference"] = data["datetime_iso"]
 
     if data.get("patient_name"):
         updates["patient_name"] = data["patient_name"]
+
+    # --- Resolución de doctor ---
+    _DOCTOR_EMAILS = {
+        "jorge": "jorge.arias.amauta@gmail.com",
+        "javier": "javiarias000@gmail.com",
+    }
+    extracted_doctor = data.get("doctor_name")
+    existing_doctor_email = state.get("doctor_email")
+
+    if extracted_doctor and extracted_doctor in _DOCTOR_EMAILS:
+        # Mención explícita en este turno — siempre sobreescribe
+        updates["doctor_email"] = _DOCTOR_EMAILS[extracted_doctor]
+    elif not existing_doctor_email:
+        # Sin doctor en estado — usar fallback por servicio
+        resolved_service = updates.get("selected_service") or state.get("selected_service")
+        if resolved_service:
+            fallback = get_email_for_short_key(resolved_service)
+            if fallback:
+                updates["doctor_email"] = fallback
+    # else: doctor ya en estado + sin mención → conservar (no tocar)
 
     # Recalcular missing
     merged = {**state, **updates}
@@ -1571,11 +1614,18 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
             pass
 
     # 3. Perfil del Usuario
+    doctor_email = state.get("doctor_email")
+    _DOCTOR_DISPLAY = {
+        "jorge.arias.amauta@gmail.com": "Dr. Jorge Arias",
+        "javiarias000@gmail.com": "Dr. Javier Arias",
+    }
     user_profile = {
         "name": state.get("patient_name"),
         "phone": state.get("phone_number"),
         "selected_service": state.get("selected_service"),
-        "service_duration": state.get("service_duration")
+        "service_duration": state.get("service_duration"),
+        "doctor_email": doctor_email,
+        "doctor_name": _DOCTOR_DISPLAY.get(doctor_email) if doctor_email else None,
     }
 
     # 4. Control del Flujo

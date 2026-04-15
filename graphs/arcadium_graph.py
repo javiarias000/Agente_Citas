@@ -281,7 +281,7 @@ async def agent_node(
     prompt_vars = {
         "intent": state.get("intent", "no clasificado"),
         "selected_service": state.get("selected_service", "no definido"),
-        "service_duration": state.get("service_duration", 30),
+        "service_duration": state.get("service_duration", 60),
         "datetime_preference": state.get("datetime_preference", "no definida"),
         "availability_checked": state.get("availability_checked", False),
         "available_slots": state.get("available_slots", []),

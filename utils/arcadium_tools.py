@@ -170,13 +170,13 @@ async def consultar_disponibilidad(
             }
 
         # Duración del servicio
-        duration = 30
+        duration = 60
         if service_type:
             try:
                 from config.calendar_mapping import get_duration_for_service
                 duration = get_duration_for_service(service_type)
             except Exception:
-                duration = 30
+                duration = 60
 
         from db import get_async_session
         async with get_async_session() as session:

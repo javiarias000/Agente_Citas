@@ -38,18 +38,18 @@ logger = structlog.get_logger("tools.calendar")
 TIMEZONE = ZoneInfo("America/Guayaquil")
 
 SERVICE_DURATIONS = {
-    "consulta": 30,
-    "limpieza": 45,
+    "consulta": 60,
+    "limpieza": 60,
     "empaste": 60,
-    "extraccion": 45,
+    "extraccion": 60,
     "endodoncia": 90,
     "ortodoncia": 60,
     "cirugia": 120,
     "implantes": 90,
     "estetica": 60,
-    "odontopediatria": 45,
+    "odontopediatria": 60,
     "blanqueamiento": 60,
-    "revision": 30,
+    "revision": 60,
 }
 
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -116,7 +116,7 @@ def make_check_availability_tool(calendar_service):
             # Ajustar fin de semana
             dt, adjusted = _adjust_weekend(dt)
 
-            duration = SERVICE_DURATIONS.get(service, 30)
+            duration = SERVICE_DURATIONS.get(service, 60)
             now_ec = datetime.now(TIMEZONE)
 
             raw_slots = await calendar_service.get_available_slots(
@@ -230,7 +230,7 @@ def make_book_appointment_tool(calendar_service, db_service):
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=TIMEZONE)
 
-            duration = SERVICE_DURATIONS.get(service, 30)
+            duration = SERVICE_DURATIONS.get(service, 60)
             end_dt = dt + timedelta(minutes=duration)
 
             # R2 — Re-verificar disponibilidad antes de crear evento.
@@ -517,7 +517,7 @@ def make_reschedule_appointment_tool(calendar_service, db_service):
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=TIMEZONE)
 
-            duration = SERVICE_DURATIONS.get(service, 30)
+            duration = SERVICE_DURATIONS.get(service, 60)
             end_dt = dt + timedelta(minutes=duration)
 
             # R1 — Create-before-Delete: crear nuevo evento PRIMERO.

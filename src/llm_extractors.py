@@ -128,7 +128,11 @@ INSTRUCCIONES:
 4. Para el nombre: revisa TODO el historial. Si el asistente preguntó el nombre y el
    usuario respondió (cualquier texto que parece un nombre propio), úsalo.
    No requiere que se presente formalmente — basta con que haya respondido a la pregunta.
-5. Retorna SOLO JSON, sin markdown.
+5. Si el usuario menciona un doctor por nombre ("Jorge"/"Javi"/"Javier"), extrae doctor_name.
+   - Menciona "Jorge" o "Dr. Jorge" → "jorge"
+   - Menciona "Javier" o "Javi" → "javier"
+   - No menciona doctor → null
+6. Retorna SOLO JSON, sin markdown.
 
 REGLA CRÍTICA DE HORA Y FECHA:
   Usuario: "a las 10" (sin fecha) → usar fecha_hoy. Si fecha_hoy="2026-04-15" → "2026-04-15T10:00"
@@ -141,6 +145,7 @@ Formato de respuesta:
   "service": "limpieza" | null,
   "datetime_iso": "2026-04-14T10:00" | null,
   "patient_name": "Juan Pérez" | null,
+  "doctor_name": "jorge" | "javier" | null,
   "confidence": 0.95,
   "needs_more_info": true,
   "missing": ["service", "datetime"]
@@ -203,6 +208,7 @@ async def extract_booking_data(
             "service": None,
             "datetime_iso": None,
             "patient_name": None,
+            "doctor_name": None,
             "confidence": 0.0,
             "missing": ["service", "datetime", "patient_name"],
         }

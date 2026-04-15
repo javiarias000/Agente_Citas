@@ -31,16 +31,16 @@ Intent = Literal[
 ]
 
 ServiceType = Literal[
-    "consulta",           # Consulta dental (30 min)
-    "limpieza",           # Limpieza dental (45 min)
-    "empaste",            # Empaste/res filling (45 min)
-    "extraccion",         # Extracción dental (45 min)
+    "consulta",           # Consulta dental (60 min)
+    "limpieza",           # Limpieza dental (60 min)
+    "empaste",            # Empaste/res filling (60 min)
+    "extraccion",         # Extracción dental (60 min)
     "endodoncia",         # Conducto (60-90 min)
     "ortodoncia",         # Ortodoncia (60 min)
     "cirugia",            # Cirugía (60-90 min)
     "implantes",          # Implante dental (90 min)
     "estetica",           # Estética dental (60 min)
-    "odontopediatria"     # Niños (30-45 min)
+    "odontopediatria"     # Niños (60 min)
 ]
 
 
@@ -71,7 +71,7 @@ class SupportState(TypedDict):
     patient_name: NotRequired[str]                # Nombre del paciente (opcional)
     patient_phone: NotRequired[str]              # Teléfono del paciente (opcional, diferente al session_id?)
     selected_service: NotRequired[ServiceType]   # Servicio dental elegido
-    service_duration: NotRequired[int]           # Duración en minutos (30, 45, 60, 90)
+    service_duration: NotRequired[int]           # Duración en minutos (60, 90)
     datetime_preference: NotRequired[str]        # Fecha/hora preferida (ISO: "2025-12-25T14:30")
     datetime_alternatives: NotRequired[List[str]]  # Alternativas si no disponible
 
@@ -170,16 +170,16 @@ def get_step_name(step: SupportStep) -> str:
 # ============================================
 
 DURATION_BY_SERVICE: Dict[ServiceType, int] = {
-    "consulta": 30,
-    "limpieza": 45,
-    "empaste": 45,
-    "extraccion": 45,
+    "consulta": 60,
+    "limpieza": 60,
+    "empaste": 60,
+    "extraccion": 60,
     "endodoncia": 60,  # Podría ser 90 dependiendo complejidad
     "ortodoncia": 60,
     "cirugia": 90,
     "implantes": 90,
     "estetica": 60,
-    "odontopediatria": 45  # Niño
+    "odontopediatria": 60  # Niño
 }
 
 # Servicios que requieren más de 30 minutos
@@ -299,7 +299,7 @@ def example_info_collector_state() -> Dict[str, Any]:
         "current_step": "scheduler",
         "intent": "agendar",
         "selected_service": "limpieza",
-        "service_duration": 45,
+        "service_duration": 60,
         "datetime_preference": "2025-12-25T14:30",
         "conversation_turns": 3
     }
@@ -328,7 +328,7 @@ def example_resolution_state() -> Dict[str, Any]:
         "appointment_details": {
             "fecha": "2025-12-25T14:30",
             "servicio": "limpieza",
-            "duracion": 45,
+            "duracion": 60,
             "estado": "confirmed"
         },
         "confirmation_sent": True,

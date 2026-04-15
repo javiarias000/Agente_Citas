@@ -19,6 +19,7 @@ def build_graph(
     llm: Any,
     store: Any = None,
     calendar_service: Any = None,
+    calendar_services: Any = None,
     db_service: Any = None,
     vector_store: Any = None,
 ) -> StateGraph:
@@ -78,7 +79,11 @@ def build_graph(
     graph.add_node("adjust_weekend", node_adjust_weekend)
     graph.add_node(
         "check_availability",
-        partial(node_check_availability, calendar_service=calendar_service),
+        partial(
+            node_check_availability,
+            calendar_service=calendar_service,
+            calendar_services=calendar_services,
+        ),
     )
     graph.add_node("detect_confirmation", node_detect_confirmation)
     graph.add_node("validate_and_confirm", node_validate_and_confirm)
@@ -87,6 +92,7 @@ def build_graph(
         partial(
             node_book_appointment,
             calendar_service=calendar_service,
+            calendar_services=calendar_services,
             db_service=db_service,
         ),
     )
@@ -113,6 +119,7 @@ def build_graph(
         partial(
             node_reschedule_appointment,
             calendar_service=calendar_service,
+            calendar_services=calendar_services,
             db_service=db_service,
         ),
     )
@@ -282,6 +289,7 @@ def compile_graph(
     llm=None,
     store=None,
     calendar_service=None,
+    calendar_services=None,
     db_service=None,
     vector_store=None,
     checkpointer=None,
@@ -294,6 +302,7 @@ def compile_graph(
         llm=llm,
         store=store,
         calendar_service=calendar_service,
+        calendar_services=calendar_services,
         db_service=db_service,
         vector_store=vector_store,
     )

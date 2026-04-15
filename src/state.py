@@ -30,21 +30,21 @@ from langgraph.graph.message import add_messages
 TIMEZONE = ZoneInfo("America/Guayaquil")
 
 BUSINESS_HOURS = (9, 18)  # 9:00–18:00
-SLOT_MINUTES = 30
+SLOT_MINUTES = 60
 
 VALID_SERVICES: Dict[str, int] = {
-    "consulta": 30,
-    "limpieza": 45,
-    "empaste": 45,
-    "extraccion": 45,
+    "consulta": 60,
+    "limpieza": 60,
+    "empaste": 60,
+    "extraccion": 60,
     "endodoncia": 90,
     "ortodoncia": 60,
     "cirugia": 90,
     "implantes": 90,
     "estetica": 60,
-    "odontopediatria": 45,
+    "odontopediatria": 60,
     "blanqueamiento": 60,
-    "revision": 30,
+    "revision": 60,
 }
 
 INTENT_KEYWORDS: Dict[str, List[str]] = {
@@ -215,6 +215,7 @@ class ArcadiumState(TypedDict, total=False):
     # --- Cita ---
     selected_service: Optional[str]
     service_duration: Optional[int]
+    doctor_email: Optional[str]           # email del doctor asignado (jorge o javier)
     datetime_preference: Optional[str]
     datetime_adjusted: bool
 

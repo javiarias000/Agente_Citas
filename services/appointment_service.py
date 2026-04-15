@@ -53,7 +53,7 @@ class AppointmentService:
         google_calendar_service: Optional[GoogleCalendarService] = None
     ):
         self.settings = settings or get_settings()
-        self.appointment_duration_minutes = 30  # Duración estándar (se sobreescribe por servicio)
+        self.appointment_duration_minutes = 60  # Duración estándar (se sobreescribe por servicio)
         self.business_hours_start = 9  # 9 AM
         self.business_hours_end = 18  # 6 PM
 

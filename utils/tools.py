@@ -538,7 +538,7 @@ class MCPGoogleCalendarTool(BaseTool):
             elif action == "get_available_slots":
                 if not start_dt:
                     return {"success": False, "error": "start_time (fecha) requerido para get_available_slots"}
-                duration = 30  # default
+                duration = 60  # default
                 slots = await self.calendar_service.get_available_slots(
                     date=start_dt,
                     duration_minutes=duration,

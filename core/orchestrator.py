@@ -137,16 +137,27 @@ class ArcadiumAPI:
 
         from services.composio_calendar_service import ComposioCalendarService
 
-        # Instanciar servicio de calendario (initialize() async se llama en _init_langgraph)
+        # Instanciar servicios de calendario para ambos doctores (initialize() async se llama en _init_langgraph)
+        JORGE_EMAIL = "jorge.arias.amauta@gmail.com"
+        JAVIER_EMAIL = "javiarias000@gmail.com"
+        self._calendar_services: Dict[str, Any] = {}
+
         try:
-            self._calendar_service = ComposioCalendarService(
-                calendar_id=self.settings.GOOGLE_CALENDAR_DEFAULT_ID,
+            jorge_svc = ComposioCalendarService(
+                calendar_id=JORGE_EMAIL,
                 timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
             )
-            logger.info("ComposioCalendarService instanciado (pendiente initialize())")
+            javier_svc = ComposioCalendarService(
+                calendar_id=JAVIER_EMAIL,
+                timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
+            )
+            self._calendar_services = {
+                JORGE_EMAIL: jorge_svc,
+                JAVIER_EMAIL: javier_svc,
+            }
+            logger.info("ComposioCalendarService instanciado para 2 doctores (pendiente initialize())")
         except Exception as e:
             logger.error("Error instanciando ComposioCalendarService", error=str(e))
-            self._calendar_service = None
 
         # FIX: OrderedDict para implementar LRU simple en el cache de agentes
         self._agents: OrderedDict[str, Any] = OrderedDict()
@@ -276,19 +287,16 @@ class ArcadiumAPI:
             self.checkpointer_ctx = PostgresSaver.from_conn_string(pg_url, serde=_serde)
             self.checkpointer = await self.checkpointer_ctx.__aenter__()
 
-            # Inicializar ComposioCalendarService (async — carga tools MCP)
-            if self._calendar_service is not None:
+            # Inicializar AMBOS ComposioCalendarService (async — carga tools MCP)
+            wrapped_calendars: Dict[str, Any] = {}
+            for email, svc in self._calendar_services.items():
                 try:
-                    await self._calendar_service.initialize()
-                    logger.info("ComposioCalendarService inicializado correctamente")
+                    await svc.initialize()
+                    from src.calendar_service import GoogleCalendarService as CalendarAdapter
+                    wrapped_calendars[email] = CalendarAdapter(calendar_service=svc, db_service=None)
+                    logger.info("CalendarAdapter inicializado", doctor=email)
                 except Exception as e:
-                    logger.error(
-                        "Error inicializando ComposioCalendarService — calendar_service=None",
-                        error=str(e),
-                    )
-                    self._calendar_service = None
-            else:
-                logger.warning("calendar_service es None — operaciones de Calendar no disponibles")
+                    logger.error("Error inicializando calendar para doctor", doctor=email, error=str(e))
 
             # Instanciar AppointmentService para persistencia en DB
             try:
@@ -299,20 +307,23 @@ class ArcadiumAPI:
                 logger.warning("No se pudo instanciar AppointmentService, db_service=None", error=str(e))
                 _db_service = None
 
-            # Envolver ComposioCalendarService en el adapter que los nodos esperan
-            raw_cal = getattr(self, "_calendar_service", None)
-            if raw_cal is not None:
-                from src.calendar_service import GoogleCalendarService as CalendarAdapter
-                wrapped_calendar = CalendarAdapter(calendar_service=raw_cal, db_service=_db_service)
-            else:
-                wrapped_calendar = None
+            # Actualizar wrapped calendars con db_service
+            for email in wrapped_calendars:
+                wrapped_calendars[email]._db = _db_service
+
+            # Default: usar primer disponible o None
+            default_email = self.settings.GOOGLE_CALENDAR_DEFAULT_ID
+            default_wrapped = wrapped_calendars.get(default_email) or (
+                next(iter(wrapped_calendars.values()), None) if wrapped_calendars else None
+            )
 
             # compilar grafo (V2 = ReAct 5 nodos; V1 = state machine 20+ nodos)
             if self.settings.USE_GRAPH_V2:
                 self.langgraph_graph = compile_graph_v2(
                     llm=self.langgraph_llm,
                     store=self.state_store,
-                    calendar_service=wrapped_calendar,
+                    calendar_service=default_wrapped,
+                    calendar_services=wrapped_calendars,
                     db_service=_db_service,
                     checkpointer=self.checkpointer,
                 )
@@ -322,7 +333,8 @@ class ArcadiumAPI:
                     llm=self.langgraph_llm,
                     store=self.state_store,
                     vector_store=self.vector_store,
-                    calendar_service=wrapped_calendar,
+                    calendar_service=default_wrapped,
+                    calendar_services=wrapped_calendars,
                     db_service=_db_service,
                     checkpointer=self.checkpointer,
                 )

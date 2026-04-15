@@ -311,7 +311,7 @@ class GoogleCalendarService:
     async def get_available_slots(
         self,
         date,
-        duration_minutes: int = 30,
+        duration_minutes: int = 60,
         start_hour: int = 9,
         end_hour: int = 18,
     ) -> List[Dict[str, Any]]:

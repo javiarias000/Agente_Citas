@@ -40,7 +40,7 @@ class ProjectAppointmentService:
         self.calendar_timezone = project_config.calendar_timezone
 
         # Configurar duración por defecto
-        self.appointment_duration_minutes = 30  # default
+        self.appointment_duration_minutes = 60  # default
 
         # Inicializar Google Calendar si está habilitado
         self.google_calendar = None
@@ -503,7 +503,7 @@ class ProjectAppointmentService:
             # Usar calendar_mapping del proyecto
             mapping = self.calendar_mapping.get(service_type)
             if mapping:
-                return int(mapping.get('duration', 30))
+                return int(mapping.get('duration', 60))
         except Exception:
             pass
 

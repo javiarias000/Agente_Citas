@@ -101,8 +101,8 @@ class TestServiceDuration:
 
     def test_get_service_duration(self):
         """Test: obtiene duración correcta"""
-        assert get_service_duration("consulta") == 30
-        assert get_service_duration("limpieza") == 45
+        assert get_service_duration("consulta") == 60
+        assert get_service_duration("limpieza") == 60
         assert get_service_duration("endodoncia") == 60
 
     def test_get_service_duration_unknown(self):

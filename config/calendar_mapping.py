@@ -8,7 +8,7 @@ Este módulo define:
 - SERVICE_DURATION: servicio oficial → duración en minutos
 """
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # ============================================
 # PALABRAS CLAVE → SERVICIO OFICIAL
@@ -174,16 +174,39 @@ SERVICE_TO_DENTIST: Dict[str, str] = {
 }
 
 # ============================================
+# SHORT KEY → DOCTOR EMAIL (mapeo directo)
+# ============================================
+SHORT_KEY_TO_EMAIL: Dict[str, str] = {
+    "consulta":        "jorge.arias.amauta@gmail.com",
+    "limpieza":        "jorge.arias.amauta@gmail.com",
+    "empaste":         "jorge.arias.amauta@gmail.com",
+    "extraccion":      "javiarias000@gmail.com",
+    "endodoncia":      "jorge.arias.amauta@gmail.com",
+    "ortodoncia":      "jorge.arias.amauta@gmail.com",
+    "cirugia":         "javiarias000@gmail.com",
+    "implantes":       "javiarias000@gmail.com",
+    "estetica":        "jorge.arias.amauta@gmail.com",
+    "odontopediatria": "jorge.arias.amauta@gmail.com",
+    "blanqueamiento":  "jorge.arias.amauta@gmail.com",
+    "revision":        "jorge.arias.amauta@gmail.com",
+}
+
+
+def get_email_for_short_key(short_key: str) -> Optional[str]:
+    """Obtiene email del doctor para una clave corta de servicio."""
+    return SHORT_KEY_TO_EMAIL.get(short_key.lower().strip())
+
+# ============================================
 # SERVICIO OFICIAL → DURACIÓN (minutos)
 # ============================================
 SERVICE_DURATION: Dict[str, int] = {
     # Odontología General
-    "Consulta inicial": 30,
-    "Consulta de control": 20,
-    "Limpieza dental profesional (profilaxis)": 45,
-    "Empaste de resina (obturación)": 45,
-    "Extracción simple": 45,
-    "Fluorización": 30,
+    "Consulta inicial": 60,
+    "Consulta de control": 60,
+    "Limpieza dental profesional (profilaxis)": 60,
+    "Empaste de resina (obturación)": 60,
+    "Extracción simple": 60,
+    "Fluorización": 60,
 
     # Endodoncia
     "Endodoncia unirradicular (1 conducto)": 60,
@@ -194,7 +217,7 @@ SERVICE_DURATION: Dict[str, int] = {
     # Periodoncia
     "Tratamiento de gingivitis": 60,
     "Tratamiento de periodontitis": 60,  # por cuadrante puede ser más
-    "Mantenimiento periodontal": 45,
+    "Mantenimiento periodontal": 60,
 
     # Ortodoncia
     "Ortodoncia metálica": 60,
@@ -221,15 +244,15 @@ SERVICE_DURATION: Dict[str, int] = {
     "Incrustaciones inlays onlays": 60,
 
     # Odontopediatría
-    "Consulta pediátrica": 30,
-    "Sellantes de fosas y fisuras": 30,
-    "Corona de acero": 45,
-    "Pulpotomía (nervio temporal)": 45,
-    "Mantenedor de espacio": 45,
+    "Consulta pediátrica": 60,
+    "Sellantes de fosas y fisuras": 60,
+    "Corona de acero": 60,
+    "Pulpotomía (nervio temporal)": 60,
+    "Mantenedor de espacio": 60,
 
     # Cirugía
     "Extracción de cordales (muelas del juicio)": 60,
-    "Frenectomía": 45,
+    "Frenectomía": 60,
     "Quistectomía": 90,
     "Apicectomía": 90,
 }
