@@ -155,6 +155,7 @@ def extract_slot_from_text(
     def _find_in_slots(h: int, m: int = 0) -> Optional[str]:
         """
         Busca el slot con hora h:m en available_slots.
+        Si no encuentra exacto, busca el más cercano (menor distancia en minutos).
         Si no encuentra y h < 9 (antes del horario laboral), intenta h+12 (PM).
         Esto resuelve "a las 4" → intenta T04 → no encontrado → intenta T16.
         """
@@ -162,6 +163,26 @@ def extract_slot_from_text(
         for slot in available_slots:
             if candidate in slot:
                 return slot
+
+        # Fallback: si no hay match exacto, buscar el más cercano
+        if available_slots:
+            from utils.date_utils import normalize_iso_datetime
+            target_mins = h * 60 + m
+            closest_slot = None
+            closest_dist = float("inf")
+
+            for slot in available_slots:
+                slot_dt = normalize_iso_datetime(slot)
+                if slot_dt:
+                    slot_mins = slot_dt.hour * 60 + slot_dt.minute
+                    dist = abs(slot_mins - target_mins)
+                    if dist < closest_dist:
+                        closest_dist = dist
+                        closest_slot = slot
+
+            if closest_slot and closest_dist <= 60:  # Max 1 hora de diferencia
+                return closest_slot
+
         # Fallback PM: si la hora no tiene contexto y está fuera del horario (< 9)
         if h < 9 and not is_pm:
             h_pm = h + 12
