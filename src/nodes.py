@@ -2046,12 +2046,28 @@ async def node_generate_response_with_tools(
     # ✅ mensajes LLM
     from langchain_core.messages import SystemMessage, AIMessage, ToolMessage
 
-    history = list(state.get("messages", []))
-    # Limitar historial para evitar que mensajes rancios de sesiones anteriores
-    # contaminen la respuesta. El JSON del sistema es la única fuente de verdad.
-    MAX_HISTORY_MESSAGES = 10
-    if len(history) > MAX_HISTORY_MESSAGES:
-        history = history[-MAX_HISTORY_MESSAGES:]
+    # ── Filtro de bajo nivel: trim_messages antes de enviar al LLM ──────────
+    # Garantiza que solo el contexto reciente y relevante llegue a OpenAI.
+    # Estrategia "last": preserva los mensajes más recientes hasta MAX_LLM_TOKENS.
+    # start_on="human": el bloque recortado siempre empieza con un HumanMessage
+    # (requisito de la API de OpenAI para evitar 400 "first message must be human").
+    from langchain_core.messages import trim_messages as _trim
+
+    MAX_LLM_TOKENS = 3_000
+    raw_history = list(state.get("messages", []))
+    try:
+        history = _trim(
+            raw_history,
+            strategy="last",
+            token_counter=llm,
+            max_tokens=MAX_LLM_TOKENS,
+            include_system=False,
+            allow_partial=False,
+            start_on="human",
+        )
+    except Exception:
+        # Fallback count-based si el modelo no soporta token counting
+        history = raw_history[-10:]
 
     # Sanear historial: OpenAI rechaza (400) si un AIMessage con tool_calls
     # no está seguido por ToolMessages con cada tool_call_id.

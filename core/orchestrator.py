@@ -18,6 +18,12 @@ FIXES APLICADOS:
 import asyncio
 import json
 import os
+
+# Cargar .env antes de cualquier import de LangChain/LangSmith.
+# LangChain lee LANGCHAIN_TRACING_V2 y LANGCHAIN_API_KEY al importarse;
+# si load_dotenv() corre después, el tracing no se activa.
+from dotenv import load_dotenv
+load_dotenv()
 import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager

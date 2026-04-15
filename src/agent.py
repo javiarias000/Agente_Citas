@@ -19,10 +19,15 @@ import asyncio
 import contextvars
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
+
 from langchain_core.messages import HumanMessage, AIMessage
 
 import structlog
+
+_TZ_EC = ZoneInfo("America/Guayaquil")
 
 
 logger = structlog.get_logger("langgraph.agent")
@@ -126,8 +131,24 @@ class ArcadiumAgent:
                 chars=len(patient_context),
             )
 
-        # thread_id estable por sesión → el checkpointer restaura el estado entre turnos
-        config = {"configurable": {"thread_id": self.session_id}}
+        # thread_id = sesión + fecha Ecuador.
+        # Segmenta la memoria por día: cada jornada abre un checkpoint limpio
+        # sin "basura" de días anteriores. La continuidad cross-day (patient_name,
+        # awaiting_confirmation, etc.) la mantiene el custom store vía node_entry.
+        date_ec = datetime.now(_TZ_EC).strftime("%Y%m%d")
+        thread_id = f"{self.session_id}_{date_ec}"
+
+        # Metadata de LangSmith: visible en la timeline de cada run.
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "run_name": f"arcadium/{phone}/{date_ec}",
+            "metadata": {
+                "phone": phone,
+                "session_id": self.session_id,
+                "date": date_ec,
+            },
+            "tags": ["arcadium", "v1"],
+        }
         try:
             result = await self.graph.ainvoke(
                 state,
