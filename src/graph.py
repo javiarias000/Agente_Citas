@@ -303,9 +303,6 @@ def compile_graph(
             checkpointer=checkpointer,
             interrupt_before=[
                 "execute_memory_tools",
-                "book_appointment",
-                "cancel_appointment",
-                "reschedule_appointment",
             ],
         )
     else:

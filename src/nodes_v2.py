@@ -151,14 +151,22 @@ def _build_system_prompt_v2(state: ArcadiumState) -> str:
             f"llama book_appointment. Si dice 'no' o pide otra fecha → "
             f"llama check_availability con la nueva fecha."
         )
-    elif awaiting and conf_type in ("cancel", "reschedule") and existing_appts:
-        appt = existing_appts[0]
+    elif awaiting and conf_type == "cancel" and state.get("existing_appointments"):
+        appts = state.get("existing_appointments", [])
+        appts_display = "\n".join([f"  • {a.get('summary')} ({a.get('start')})" for a in appts])
         flow_block = (
-            f"\n⚠️ FLUJO EN PROGRESO: Encontraste la cita del paciente: "
+            f"\n⚠️ FLUJO EN PROGRESO: Encontraste estas citas:\n{appts_display}\n"
+            f"Si el paciente confirma cancelar → llama cancel_appointment(event_id, phone_number). "
+            f"Si quiere reagendar → llama check_availability + reschedule_appointment."
+        )
+    elif awaiting and conf_type == "reschedule" and state.get("existing_appointments"):
+        appt = state.get("existing_appointments", [])[0]
+        flow_block = (
+            f"\n⚠️ FLUJO EN PROGRESO: El paciente quiere reagendar la cita: "
             f"{appt.get('summary','')} — {appt.get('start','')}. "
             f"event_id: {appt.get('event_id','')}\n"
-            f"Si el paciente confirma cancelar → cancel_appointment. "
-            f"Si quiere reagendar → check_availability + reschedule_appointment."
+            f"Llama check_availability para mostrar nuevos slots. "
+            f"Cuando confirme → reschedule_appointment."
         )
     elif google_event_id and state.get("confirmation_sent"):
         # Esto no debería llegar al LLM — node_format_response lo intercepta
@@ -167,8 +175,18 @@ def _build_system_prompt_v2(state: ArcadiumState) -> str:
             f"Confirma al paciente con los datos del sistema."
         )
 
+    # Bloque de soporte total (evitar alucinaciones de incapacidad)
+    support_block = """
+    SOPORTE TOTAL:
+    • PUEDES cancelar citas usando cancel_appointment.
+    • PUEDES reagendar citas usando reschedule_appointment.
+    • NUNCA digas "no puedo cancelar" o "llame a la clínica para cancelar".
+    • Si tienes la tool, tienes la capacidad.
+    """
+
     return f"""Eres Deyy, recepcionista de Arcadium Rehabilitación Oral (Ecuador).
 Tono: cálido, formal (usted), conciso. Máx 2-3 líneas. Máx 2 emojis del set: 😊👋📅✅❌🦷⏰📞
+{support_block}
 
 TIEMPO ACTUAL (Ecuador, UTC-5):
   Hoy: {dia} {fecha} — Hora: {hora}

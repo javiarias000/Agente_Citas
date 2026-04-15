@@ -111,6 +111,13 @@ def detect_confirmation(text: str) -> Literal["yes", "no", "slot_choice", "unkno
     if normalized in CONFIRM_NO:
         return "no"
 
+    # Check for time patterns BEFORE word-boundary matches.
+    # "A las 9 esta bien" contains both a time AND a confirm word.
+    # Explicit hour wins: if user named a time, that's a slot choice.
+    time_pattern = r"(\b(\d{1,2})(:\d{2})?\b)"
+    if re.search(time_pattern, text):
+        return "slot_choice"
+
     # Check word-boundary matches (e.g., "sí, confirmo" contains "sí" as a word)
     # Se usa \b para no confundir "no" dentro de "noche", "uno", etc.
     # ni "si" dentro de "servicio".
@@ -118,11 +125,6 @@ def detect_confirmation(text: str) -> Literal["yes", "no", "slot_choice", "unkno
         return "yes"
     if any(re.search(r"\b" + re.escape(kw) + r"\b", normalized) for kw in CONFIRM_NO):
         return "no"
-
-    # Check for time patterns: "a las 10", "las 3", "10:00", "a las 10:30"
-    time_pattern = r"(\b(\d{1,2})(:\d{2})?\b)"
-    if re.search(time_pattern, text):
-        return "slot_choice"
 
     return "unknown"
 

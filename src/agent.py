@@ -24,7 +24,6 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 import structlog
 
-from src.state import create_initial_arcadium_state
 
 logger = structlog.get_logger("langgraph.agent")
 
@@ -107,58 +106,17 @@ class ArcadiumAgent:
         phone = self.session_id.replace("deyy_", "")
         self._phone_var.set(phone)
 
-        # Construir estado inicial vacío
-        state = create_initial_arcadium_state(
-            phone_number=phone,
-            project_id=self.project_id,
-        )
-
-        state["_incoming_message"] = message
-        state["conversation_turns"] = 0
-        
-        # Restaurar campos persistentes del estado previo (NO mensajes)
-        try:
-            prev_state = await self.store.get_agent_state(phone)
-            if prev_state:
-                # Campos estables — siempre se restauran
-                for f in [
-                    "patient_name",
-                    "conversation_turns",
-                    "awaiting_confirmation",
-                    "confirmation_type",
-                    "errors_count",
-                ]:
-                    if f in prev_state and prev_state[f] is not None:
-                        state[f] = prev_state[f]
-
-                # Campos de flujo — se restauran si la cita NO fue completada.
-                # confirmation_sent=True significa que el flujo terminó (cita creada/cancelada).
-                # En ese caso, no restaurar para no contaminar un nuevo flujo.
-                # Si confirmation_sent=False/None, el flujo está en progreso (pidiendo campos,
-                # esperando confirmación, etc.) → restaurar todo el contexto de booking.
-                if not prev_state.get("confirmation_sent"):
-                    for f in [
-                        "selected_service",
-                        "service_duration",
-                        "intent",
-                        "datetime_preference",
-                        "available_slots",
-                        "selected_slot",
-                        "appointment_id",
-                        "google_event_id",
-                        "google_event_link",
-                    ]:
-                        if f in prev_state and prev_state[f] is not None:
-                            state[f] = prev_state[f]
-        except Exception as e:
-            logger.warning("No se pudo cargar estado previo", error=str(e))
-
-        # CRÍTICO: recalcular missing_fields DESPUÉS de restaurar campos
-        from src.state import get_missing_fields
-        state["missing_fields"] = get_missing_fields(state)
+        # Estado mínimo por turno — solo campos que deben resetearse en cada mensaje.
+        # El checkpointer (PostgresSaver) restaura automáticamente awaiting_confirmation,
+        # selected_service, patient_name, etc. del turno anterior.
+        # node_entry limpia el contexto de booking cuando confirmation_sent=True.
+        state: Dict[str, Any] = {
+            "_incoming_message": message,
+            "phone_number": phone,
+            "project_id": self.project_id,
+        }
 
         # Enriquecer con memoria del paciente (tipada + semántica)
-        phone = self.session_id.replace("deyy_", "")
         patient_context = await self._load_patient_context(phone, message)
         if patient_context:
             state["semantic_memory_context"] = patient_context
@@ -168,11 +126,8 @@ class ArcadiumAgent:
                 chars=len(patient_context),
             )
 
-        # Invocar grafo
-        # UUID por invocación: evita que add_messages acumule mensajes del checkpoint
-        # de sesiones anteriores. La historia real viene del store (limit=10 en node_entry).
-        invoke_thread_id = f"{self.session_id}_{uuid.uuid4().hex[:8]}"
-        config = {"configurable": {"thread_id": invoke_thread_id}}
+        # thread_id estable por sesión → el checkpointer restaura el estado entre turnos
+        config = {"configurable": {"thread_id": self.session_id}}
         try:
             result = await self.graph.ainvoke(
                 state,
@@ -194,9 +149,6 @@ class ArcadiumAgent:
                 text="Lo siento, hubo un error técnico. Por favor llame a la clínica. 📞",
                 status="error",
             )
-
-        # FIX: NO persistir mensajes aquí. node_save_state ya lo hace.
-        # Hacerlo en ambos lados causaba mensajes duplicados en el store.
 
         return self._extract_response(result)
 

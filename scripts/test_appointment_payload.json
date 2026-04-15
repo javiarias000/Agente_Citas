@@ -1,0 +1,17 @@
+{
+  "body": {
+    "conversation": {
+      "messages": [
+        {
+          "sender": {
+            "phone_number": "+34612345678",
+            "name": "Juan Pérez"
+          },
+          "content": "Hola, me gustaría agendar una cita para mañana a las 10 de la mañana"
+        }
+      ]
+    }
+  },
+  "account_id": 1,
+  "conversation_id": 1001
+}

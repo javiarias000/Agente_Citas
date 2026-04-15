@@ -170,6 +170,7 @@ TRANSIENT_FIELDS: Set[str] = {
     "calendar_lookup_done",   # se recalcula en cada turno de agendar/cancelar/reagendar
     "calendar_appointment_found",
     "existing_appointments",  # lista de citas encontradas (se recalcula cada turno)
+    "rebook_after_cancel",  # flag transitorio para flujo cancel+rebook
 }
 
 
@@ -201,7 +202,8 @@ class ArcadiumState(TypedDict, total=False):
     # --- Flujo ---
     intent: Optional[str]
     awaiting_confirmation: bool
-    confirmation_type: Optional[Literal["book", "cancel", "reschedule"]]
+    confirmation_type: Optional[Literal["book", "cancel", "reschedule", "cancel_and_rebook"]]
+    rebook_after_cancel: Optional[bool]
     current_step: str
     confirmation_result: Optional[str]
 

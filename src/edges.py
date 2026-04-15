@@ -134,7 +134,7 @@ def edge_after_confirm(state: Dict[str, Any]) -> str:
     if result == "yes":
         if ctype == "book":
             return "book_appointment"
-        if ctype == "cancel":
+        if ctype in ("cancel", "cancel_and_rebook"):
             return "cancel_appointment"
         if ctype == "reschedule":
             # El usuario confirmó reagendar; si ya tiene slot → ejecutar.
@@ -207,7 +207,8 @@ def edge_after_check_existing(state: Dict[str, Any]) -> str:
     found = state.get("calendar_appointment_found", False)
 
     if intent == "agendar":
-        return "generate_response" if found else "check_missing"
+        # Existing appointment → offer to cancel and rebook via prepare_modification
+        return "prepare_modification" if found else "check_missing"
 
     # cancelar / reagendar
     return "prepare_modification" if found else "generate_response"

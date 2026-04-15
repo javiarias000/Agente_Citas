@@ -32,7 +32,7 @@ try:
 except ImportError:
     pass
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
 
 from src.llm_extractors import (
     extract_booking_data,
@@ -101,6 +101,10 @@ REGLAS CRÍTICAS:
 - Si el dato ya aparece en el contexto o ya lo conocías de turnos anteriores: NO vuelvas a guardarlo.
 - Una memoria se guarda UNA sola vez. Si ya existe en el contexto del paciente, omite la llamada.
 - No guardes datos transitorios de la cita actual (nombre, fecha, servicio del agendamiento en curso).
+- SI EL USUARIO DICE "A LAS N" O "X DE LA MAÑANA/TARDE" SIN ESPECIFICAR DÍA → ES HOY MISMO.
+- NUNCA asumas "mañana" si el usuario no lo mencionó explícitamente.
+- SI LA HORA SOLICITADA PARA HOY YA PASÓ, ENTONCES Y SOLO ENTONCES, OFRECE SLOTS PARA EL DÍA SIGUIENTE.
+- NUNCA DIGAS "NO PUEDO CANCELAR" NI "LLAME A LA CLÍNICA PARA CANCELAR". TIENES LA CAPACIDAD DE GESTIONAR CITAS.
 
 SITUACIÓN ACTUAL:
 {context}
@@ -168,6 +172,9 @@ def _safe_node(func_name: str):
 # ═══════════════════════════════════════════
 
 
+_CHECKPOINT_HISTORY_LIMIT = 9  # Keep last 9 + 1 new = 10 total
+
+
 async def node_entry(
     state: ArcadiumState,
     *,
@@ -176,15 +183,10 @@ async def node_entry(
     """
     Primer nodo del grafo.
     - Calcula fechas con Python (nunca LLM)
-    - Carga historial del store y construye messages = history + [nuevo mensaje]
-    - Restaura campos persistentes del estado previo
+    - El historial viene del checkpointer (PostgresSaver); se recorta a 10 msgs
+    - Si el turno anterior completó una operación (confirmation_sent=True), limpia
+      el contexto de booking para que la nueva conversación empiece sin residuos
     - Incrementa conversation_turns
-
-    FIX: Antes solo mergeaba historial si state["messages"] estaba vacío.
-    Como agent.py enviaba state["messages"] con datos, la condición era False
-    y el historial nunca se incluía → el agente olvidaba la conversación.
-    Ahora SIEMPRE carga desde el store y construye el historial completo,
-    independientemente de lo que venga en state["messages"].
     """
     now = datetime.now(TIMEZONE)
     manana = now + timedelta(days=1)
@@ -203,7 +205,6 @@ async def node_entry(
     # Obtener el mensaje nuevo desde _incoming_message (enviado por agent.py)
     incoming = state.get("_incoming_message", "")
     if not incoming:
-        # Fallback: tomar el último HumanMessage del estado si existe
         for msg in reversed(state.get("messages", [])):
             if isinstance(msg, HumanMessage) or getattr(msg, "type", None) == "human":
                 incoming = msg.content
@@ -211,92 +212,64 @@ async def node_entry(
 
     new_message = HumanMessage(content=incoming)
 
-    if store and hasattr(store, "get_history"):
+    # ── Mensajes: el checkpointer restaura el historial completo.
+    # Recortamos a HISTORY_LIMIT usando RemoveMessage para evitar crecimiento ilimitado,
+    # luego añadimos el mensaje nuevo del turno actual.
+    existing_messages = list(state.get("messages", []))
+    msgs_out: list = []
+    if len(existing_messages) > _CHECKPOINT_HISTORY_LIMIT:
+        to_trim = existing_messages[:-_CHECKPOINT_HISTORY_LIMIT]
+        msgs_out.extend(RemoveMessage(id=m.id) for m in to_trim)
+        existing_messages = existing_messages[-_CHECKPOINT_HISTORY_LIMIT:]
+    msgs_out.append(new_message)
+    updates["messages"] = msgs_out
+    updates["_history_len"] = len(existing_messages)
+
+    logger.info(
+        "node_entry: historial desde checkpointer",
+        history_len=len(existing_messages),
+        phone=state.get("phone_number", ""),
+    )
+
+    # ── Limpiar contexto de booking si el turno anterior lo completó.
+    # confirmation_sent=True indica que la operación fue ejecutada (cita creada/cancelada).
+    # Sin este reset, selected_service/awaiting_confirmation/etc. del turno anterior
+    # contaminarían el nuevo flujo.
+    if state.get("confirmation_sent"):
+        updates.update({
+            "confirmation_sent": False,
+            "awaiting_confirmation": False,
+            "confirmation_type": None,
+            "confirmation_result": None,
+            "rebook_after_cancel": None,
+            "intent": None,
+            "selected_service": None,
+            "service_duration": None,
+            "datetime_preference": None,
+            "datetime_adjusted": False,
+            "available_slots": [],
+            "selected_slot": None,
+            "appointment_id": None,
+            "google_event_id": None,
+            "google_event_link": None,
+            "errors_count": 0,
+        })
+
+    # ── patient_name: fallback desde user_profiles si el checkpointer no lo tiene.
+    # Cubre el primer turno de una sesión nueva sin checkpoint previo.
+    if not state.get("patient_name") and store and hasattr(store, "get_user_profile"):
         try:
             phone = state.get("phone_number", "")
-
-            # FIX: Cargar un historial corto (10 msgs) para evitar que el LLM
-            # alucine con citas de conversaciones muy antiguas.
-            history = await store.get_history(phone, limit=10)
-            logger.info("node_entry: historial cargado", phone=phone, history_len=len(history))
-            updates["messages"] = list(history) + [new_message]
-            # Registrar cuántos mensajes existían antes de este turno.
-            # node_save_state usará este valor para guardar SOLO los mensajes nuevos.
-            updates["_history_len"] = len(history)
-
-
-            # Restaurar campos persistentes desde el estado guardado.
-            #
-            # Campos estables (siempre se restauran — son datos del perfil del paciente
-            # o del estado del flujo en curso):
-            #   patient_name, patient_phone → perfil del paciente, no cambia entre sesiones
-            #   awaiting_confirmation, confirmation_type → estado de flujo en progreso
-            #
-            # Campos transitorios (solo se restauran cuando hay un flujo en progreso,
-            # es decir, awaiting_confirmation=True). Si la sesión anterior terminó
-            # normalmente, estos campos pertenecen a una cita ya completada y NO deben
-            # contaminar la nueva conversación:
-            #   selected_service, service_duration, intent, datetime_preference,
-            #   appointment_id, google_event_id, available_slots, selected_slot
-            prev_state = await store.get_agent_state(phone)
-            if prev_state:
-                # Siempre restaurar — datos del perfil y estado de flujo
-                for f in [
-                    "patient_name",
-                    "patient_phone",
-                    "awaiting_confirmation",
-                    "confirmation_type",
-                ]:
-                    if f in prev_state and prev_state[f] is not None:
-                        updates[f] = prev_state[f]
-
-                # Campos de flujo — se restauran si la cita NO fue completada.
-                # confirmation_sent=True → flujo terminó, no restaurar para no contaminar
-                # uno nuevo. Si False/None → flujo en progreso (pidiendo campos faltantes,
-                # esperando confirmación, etc.) → restaurar contexto de booking completo.
-                if not prev_state.get("confirmation_sent"):
-                    for f in [
-                        "selected_service",
-                        "service_duration",
-                        "intent",
-                        "datetime_preference",
-                        "google_event_link",
-                        "available_slots",
-                        "selected_slot",
-                        "appointment_id",
-                        "google_event_id",
-                    ]:
-                        if f in prev_state and prev_state[f] is not None:
-                            updates[f] = prev_state[f]
-
-
-            # Fallback adicional para patient_name: intentar desde user_profiles
-            # Cubre el caso donde agent_state no tiene patient_name (primer turno o
-            # después de una sesión sin appointment) pero el perfil sí lo tiene.
-            if not updates.get("patient_name"):
-                try:
-                    profile = await store.get_user_profile(phone)
-                    if profile and profile.get("patient_name"):
-                        updates["patient_name"] = profile["patient_name"]
-                        logger.info(
-                            "node_entry: patient_name restaurado desde user_profile",
-                            phone=phone,
-                            patient_name=profile["patient_name"],
-                        )
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.warning("no se pudo cargar estado previo", error=str(e))
-            # Fallback seguro: al menos incluir el mensaje nuevo.
-            # IMPORTANTE: resetear _history_len a 0 porque messages se sobreescribe
-            # sin historial. Si _history_len quedara con un valor previo (del try block
-            # parcialmente ejecutado), node_save_state calcularía new_messages[N:] vacío.
-            updates["messages"] = [new_message]
-            updates["_history_len"] = 0
-    else:
-        updates["messages"] = [new_message]
-        updates["_history_len"] = 0
+            profile = await store.get_user_profile(phone)
+            if profile and profile.get("patient_name"):
+                updates["patient_name"] = profile["patient_name"]
+                logger.info(
+                    "node_entry: patient_name desde user_profile",
+                    phone=phone,
+                    patient_name=profile["patient_name"],
+                )
+        except Exception:
+            pass
 
     # Escalación por número de turns
     if updates["conversation_turns"] >= 10:
@@ -1322,51 +1295,7 @@ async def node_save_state(
 
         await store.save_agent_state(phone, filter_persistent_state(state))
 
-        # Persistir SOLO el último HumanMessage y el último AIMessage limpio del turno.
-        #
-        # ¿Por qué no guardar todos los mensajes nuevos?
-        # El flujo tool-calling produce: [HumanMessage, AIMessage(tool_calls=[...]),
-        # ToolMessage, AIMessage(content="respuesta final")].
-        # Si guardamos el AIMessage con tool_calls sin su ToolMessage correspondiente,
-        # la próxima llamada a OpenAI falla: "assistant message with tool_calls must be
-        # followed by tool messages". Guardando solo el par limpio (Human+AI_final)
-        # la historia siempre es válida para la API.
-        messages = state.get("messages", [])
-        history_len = state.get("_history_len", 0)
-        new_messages = messages[history_len:]
-
-        from langchain_core.messages import AIMessage
-        from langchain_core.messages import HumanMessage as HM
-
-        # Encontrar el último HumanMessage y el último AIMessage sin tool_calls
-        last_human = None
-        last_ai = None
-        for msg in reversed(new_messages):
-            if last_ai is None and isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
-                last_ai = msg
-            if last_human is None and isinstance(msg, HM):
-                last_human = msg
-            if last_human is not None and last_ai is not None:
-                break
-
-        to_save = [m for m in [last_human, last_ai] if m is not None]
-        saved_count = 0
-        for msg in to_save:
-            try:
-                await store.add_message(
-                    phone, msg, project_id=state.get("project_id")
-                )
-                saved_count += 1
-            except Exception as e:
-                logger.warning("Error guardando mensaje", error=str(e))
-        logger.info(
-            "node_save_state: mensajes guardados",
-            phone=phone,
-            count=saved_count,
-            history_len=history_len,
-            total_messages=len(messages),
-            new_messages_in_turn=len(new_messages),
-        )
+        # Mensajes persistidos por el checkpointer (PostgresSaver) — no duplicar aquí.
 
         # Actualizar perfil del usuario
         profile_updates = {}

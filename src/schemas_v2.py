@@ -139,6 +139,8 @@ def extract_state_updates(tool_name: str, result) -> dict:
                 ]
                 # Cargar el event_id del más reciente para cancelar/reagendar
                 updates["google_event_id"] = result.appointments[0].event_id
+                updates["awaiting_confirmation"] = True
+                updates["confirmation_type"] = "cancel"
 
     elif tool_name == "reschedule_appointment":
         if isinstance(result, RescheduleAppointmentResult):
