@@ -1461,10 +1461,16 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
     }
 
     # 2. Estado de Disponibilidad
+    # Si la operación fue confirmada, el slot relevante es el AGENDADO (selected_slot),
+    # no la preferencia original. Mostramos booked_slot para que el LLM no confunda
+    # la preferencia (ej. 10:00) con el slot real (ej. 12:00).
+    confirmed = state.get("confirmation_sent", False)
+    booked_slot = state.get("selected_slot") if confirmed else None
     availability_truth = {
-        "slots_available": state.get("available_slots", []),
+        "slots_available": [] if confirmed else state.get("available_slots", []),
         "preference_match": False,
-        "requested_datetime": state.get("datetime_preference")
+        "requested_datetime": None if confirmed else state.get("datetime_preference"),
+        "booked_slot": booked_slot,  # None cuando no hay booking aún
     }
 
     if availability_truth["requested_datetime"] and availability_truth["slots_available"]:
@@ -1624,8 +1630,14 @@ async def node_generate_response_with_tools(
     if selected_service:
         context_parts.append(f"Servicio: {selected_service}")
 
-    datetime_pref = context_dict.get("availability", {}).get("requested_datetime")
-    if datetime_pref:
+    # Cuando la operación fue confirmada, mostrar el slot AGENDADO (no la preferencia original).
+    # La preferencia original (datetime_preference) puede diferir del slot real (selected_slot)
+    # y confunde al LLM haciéndole pensar que "el horario ya pasó".
+    booked_slot_ctx = context_dict.get("availability", {}).get("booked_slot")
+    if booked_slot_ctx:
+        context_parts.append(f"Cita agendada en: {_format_datetime_readable(booked_slot_ctx)}")
+    elif context_dict.get("availability", {}).get("requested_datetime"):
+        datetime_pref = context_dict["availability"]["requested_datetime"]
         context_parts.append(f"Preferencia temporal del usuario: {datetime_pref}")
 
     # ✅ slots disponibles — mostrar los 4 más cercanos a la hora solicitada
@@ -1711,12 +1723,15 @@ async def node_generate_response_with_tools(
     # Si existe un google_event_id y se ha marcado la confirmación como enviada,
     # la cita EXISTE y el LLM DEBE confirmarla, sin importar el intent actual.
     if google_event_id and confirmation_sent:
+        _booked = state.get("selected_slot", "")
+        _booked_hr = _format_datetime_readable(_booked) if _booked else "el horario confirmado"
         context_parts.insert(0,
-            f"✅ VERDAD ABSOLUTA DEL SISTEMA: La operación fue la exitosa. "
+            f"✅ VERDAD ABSOLUTA DEL SISTEMA: La operación fue exitosa. "
             f"Google Calendar ID: {google_event_id}. "
-            "Toda la información de disponibilidad anterior es irrelevante. "
-            "Tu ÚNICA misión es confirmar la cita al usuario con entusiasmo y claridad. "
-            "PROHIBIDO decir que no hay disponibilidad o mencionar citas inexistentes."
+            f"Hora agendada: {_booked_hr}. "
+            "PROHIBIDO decir que la hora ya pasó, que no hay disponibilidad, "
+            "o mencionar horarios distintos al agendado. "
+            "Tu ÚNICA misión es confirmar la cita al usuario con entusiasmo y claridad."
         )
 
     # ── GUARDIAS CRÍTICAS: prevenir confirmaciones falsas ──────────────────
@@ -1754,10 +1769,13 @@ async def node_generate_response_with_tools(
         # (encontrada por check_existing para un paciente que ya tiene cita) se confunda
         # con una cita RECIÉN CREADA. confirmation_sent solo se setea en node_book_appointment.
         if google_event_id and confirmation_sent:
+            _sl = state.get("selected_slot", "")
+            _sl_hr = _format_datetime_readable(_sl) if _sl else "el horario confirmado"
             context_parts.insert(0,
                 f"✅ VERDAD ABSOLUTA: LA CITA HA SIDO CREADA EXITOSAMENTE (ID: {google_event_id}). "
-                "Toda la información de disponibilidad anterior es irrelevante porque el slot ya es del usuario. "
-                "Sigue estrictamente el formato de confirmación de éxito."
+                f"Slot agendado: {_sl_hr}. "
+                "PROHIBIDO decir que la hora ya pasó o que no hay disponibilidad. "
+                "Confirma al usuario SU CITA con el horario exacto indicado arriba."
             )
         elif not lookup_done and not slots:
             context_parts.append(
