@@ -784,6 +784,21 @@ def _event_to_dict(ev: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _extract_patient_name_from_description(description: str) -> Optional[str]:
+    """
+    Extrae nombre del paciente de descripción de evento.
+    Formato esperado: "Paciente: NombreDelPaciente\nTeléfono: ..."
+    """
+    if not description:
+        return None
+    for line in description.split("\n"):
+        if line.startswith("Paciente:"):
+            name = line.replace("Paciente:", "").strip()
+            if name:
+                return name
+    return None
+
+
 async def node_check_existing_appointment(
     state: ArcadiumState,
     *,
@@ -939,6 +954,11 @@ async def node_check_existing_appointment(
         existing = [_event_to_dict(ev) for ev in patient_events[:3]]
         first = existing[0]
 
+        # Auto-fill paciente name si no se tiene y existe en la descripción del evento
+        extracted_name = _extract_patient_name_from_description(first.get("description", ""))
+        if extracted_name and not patient_name:
+            patient_name = extracted_name
+
         # ── Calcular slots libres aproximados en el día solicitado ────────────
         slots_avail = _compute_slots_available(all_events, requested_day, service, tz, state)
 
@@ -973,6 +993,7 @@ async def node_check_existing_appointment(
                 "calendar_first_match": first_exact_match,
                 "google_event_id": first["event_id"],
                 "google_event_link": first["html_link"],
+                "patient_name": patient_name,  # Auto-filled from existing appointment
             }
 
         # intent == "agendar" (o cualquier otro): comprobar si hay conflicto de día
@@ -1007,6 +1028,7 @@ async def node_check_existing_appointment(
                 "calendar_first_match": first_exact_match,
                 "google_event_id": first["event_id"],
                 "google_event_link": first["html_link"],
+                "patient_name": patient_name,  # Auto-filled from existing appointment
             }
 
         # Sin conflicto de día (cita en otro día o fecha aún desconocida):
@@ -1027,6 +1049,7 @@ async def node_check_existing_appointment(
             "calendar_first_match": None,
             "google_event_id": None,               # no tocar el event_id del booking actual
             "google_event_link": None,
+            "patient_name": patient_name,  # Auto-filled from existing appointment
         }
 
     except Exception as e:
