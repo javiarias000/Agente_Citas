@@ -196,19 +196,64 @@ def edge_after_check_existing(state: Dict[str, Any]) -> str:
     Después de node_check_existing_appointment (forcing tool).
 
     - Para intent "agendar":
-        · Encontró cita  → generate_response (informar, ofrecer reagendar/cancelar)
-        · No encontró    → check_missing (continuar flujo de agendamiento)
+        · No encontró cita       → check_missing (flujo normal)
+        · Encontró cita Y conflicto mismo día con fecha solicitada
+                                 → prepare_modification (ofrecer reagendar/cancelar)
+        · Encontró cita pero en OTRO día (o fecha aún desconocida)
+                                 → check_missing (no hay conflicto real)
 
     - Para intent "cancelar" / "reagendar":
-        · Encontró cita  → prepare_modification (tiene el event_id para operar)
+        · Encontró cita  → prepare_modification
         · No encontró    → generate_response (informar que no hay cita)
     """
+    from zoneinfo import ZoneInfo
+
     intent = state.get("intent", "")
     found = state.get("calendar_appointment_found", False)
 
     if intent == "agendar":
-        # Existing appointment → offer to cancel and rebook via prepare_modification
-        return "prepare_modification" if found else "check_missing"
+        if not found:
+            return "check_missing"
+
+        # Hay cita existente — verificar si es conflicto real (mismo día).
+        # Si el usuario aún no proporcionó la fecha (datetime_preference vacío),
+        # no podemos determinar conflicto → dejar que check_missing recoja la fecha primero.
+        requested = state.get("datetime_preference")
+        if not requested:
+            return "check_missing"
+
+        existing = state.get("existing_appointments", [])
+        try:
+            tz = ZoneInfo("America/Guayaquil")
+            req_date = datetime.fromisoformat(
+                requested.replace("Z", "+00:00")
+            ).astimezone(tz).date()
+
+            for appt in existing:
+                start = appt.get("start", "")
+                if not start:
+                    continue
+                appt_date = datetime.fromisoformat(
+                    start.replace("Z", "+00:00")
+                ).astimezone(tz).date()
+                if appt_date == req_date:
+                    # Conflicto mismo día → ofrecer reagendar/cancelar
+                    logger.info(
+                        "edge_check_existing: conflicto mismo día",
+                        req_date=str(req_date),
+                        appt_date=str(appt_date),
+                    )
+                    return "prepare_modification"
+
+            # Todas las citas existentes son en otro día → sin conflicto
+            logger.info(
+                "edge_check_existing: cita existente en otro día, sin conflicto",
+                requested=requested,
+            )
+        except Exception as exc:
+            logger.warning("edge_check_existing: error comparando fechas", error=str(exc))
+
+        return "check_missing"
 
     # cancelar / reagendar
     return "prepare_modification" if found else "generate_response"
