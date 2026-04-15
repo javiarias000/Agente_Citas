@@ -373,9 +373,11 @@ async def node_check_availability(
             days = 7 - dt.weekday()
             dt = dt + timedelta(days=days)
 
-        # FIX: pasar datetime (no date) — la firma de get_available_slots espera datetime.
+        # Pasar SOLO la fecha (midnight) — get_available_slots busca slots para todo el día.
+        # La hora específica en datetime_preference se usa después para recomendar el slot más cercano.
+        dt_date = dt.replace(hour=0, minute=0, second=0, microsecond=0)
         slots = await calendar_service.get_available_slots(
-            date=dt,
+            date=dt_date,
             duration_minutes=duration,
         )
 
@@ -952,21 +954,79 @@ async def node_check_existing_appointment(
             slots_available=slots_avail,
         )
 
-        # Para reagendar y cancelar: NO sobreescribir datetime_preference con el tiempo de
-        # la cita existente. El contexto del LLM usa existing_appointments[0].start para
-        # mostrar la fecha/hora de la cita vieja. Sobreescribir datetime_preference destruye
-        # información útil del mensaje del usuario (ej. "a las 10") antes de que
-        # detect_confirmation pueda extraerla.
+        # ── Clasificar el hallazgo según intent ──────────────────────────────
+        #
+        # Para "cancelar" / "reagendar": siempre queremos el event_id para operar.
+        #
+        # Para "agendar": solo hay un conflicto REAL si la cita existente es el MISMO
+        # día que el slot solicitado. Una cita en otro día NO debe bloquear la nueva
+        # reserva; solo debe informarse como contexto.
+        # Si aún no se conoce la fecha solicitada (datetime_preference=None) se asume
+        # sin conflicto y se deja que check_missing recoja la fecha primero.
+        if intent in ("cancelar", "reagendar"):
+            return {
+                "calendar_lookup_done": True,
+                "calendar_appointment_found": True,
+                "existing_appointments": existing,
+                "calendar_total_for_patient": len(patient_events),
+                "calendar_slots_available": slots_avail,
+                "calendar_first_match": first_exact_match,
+                "google_event_id": first["event_id"],
+                "google_event_link": first["html_link"],
+            }
+
+        # intent == "agendar" (o cualquier otro): comprobar si hay conflicto de día
+        same_day_conflict = False
+        if requested_day:
+            for ev_dict in existing:
+                ev_start_str = ev_dict.get("start", "")
+                if not ev_start_str:
+                    continue
+                try:
+                    ev_dt = datetime.fromisoformat(ev_start_str)
+                    ev_dt = ev_dt.replace(tzinfo=tz) if ev_dt.tzinfo is None else ev_dt
+                    if ev_dt.date() == requested_day.date():
+                        same_day_conflict = True
+                        break
+                except ValueError:
+                    pass
+
+        if same_day_conflict:
+            # Conflicto real: el paciente ya tiene cita ESE día → prepare_modification
+            logger.info(
+                "node_check_existing_appointment: conflicto mismo día",
+                requested=requested_day.date().isoformat(),
+                existing_start=first["start"],
+            )
+            return {
+                "calendar_lookup_done": True,
+                "calendar_appointment_found": True,
+                "existing_appointments": existing,
+                "calendar_total_for_patient": len(patient_events),
+                "calendar_slots_available": slots_avail,
+                "calendar_first_match": first_exact_match,
+                "google_event_id": first["event_id"],
+                "google_event_link": first["html_link"],
+            }
+
+        # Sin conflicto de día (cita en otro día o fecha aún desconocida):
+        # NO establecer calendar_appointment_found=True ni google_event_id.
+        # Se mantiene existing_appointments para que el LLM informe "tiene una cita
+        # el [día X]" como contexto, pero sin bloquear el nuevo agendamiento.
+        logger.info(
+            "node_check_existing_appointment: cita en otro día — sin conflicto para agendar",
+            requested=requested_day.date().isoformat() if requested_day else "desconocida",
+            existing_start=first["start"],
+        )
         return {
             "calendar_lookup_done": True,
-            "calendar_appointment_found": True,
-            "existing_appointments": existing,
+            "calendar_appointment_found": False,   # no hay conflicto para la nueva cita
+            "existing_appointments": existing,     # mantener para contexto informativo
             "calendar_total_for_patient": len(patient_events),
             "calendar_slots_available": slots_avail,
-            "calendar_first_match": first_exact_match,
-            # google_event_id es necesario para cancel/reschedule
-            "google_event_id": first["event_id"],
-            "google_event_link": first["html_link"],
+            "calendar_first_match": None,
+            "google_event_id": None,               # no tocar el event_id del booking actual
+            "google_event_link": None,
         }
 
     except Exception as e:
@@ -1648,51 +1708,31 @@ async def node_generate_response_with_tools(
     slots = context_dict.get("availability", {}).get("slots_available", [])
     if slots:
         preferred_slots = slots
-        if datetime_pref:
-            try:
-                pref_dt = datetime.fromisoformat(datetime_pref)
-                pref_time = pref_dt.hour * 60 + pref_dt.minute
-
-                def _slot_distance(s):
-                    try:
-                        dt = datetime.fromisoformat(s) if isinstance(s, str) else s
-                        t = dt.hour * 60 + dt.minute
-                        return abs(t - pref_time)
-                    except Exception:
-                        return 9999
-
-                preferred_slots = sorted(slots, key=_slot_distance)
-            except Exception:
-                pass
-
-        # Verificamos si alguno de los slots coincide exactamente con la preferencia del usuario
-        exact_match = None
+        # --- LÓGICA DE COMPARACIÓN DE SLOTS ---
         if datetime_pref:
             logger.info("DEBUG_MATCH: Iniciando comparacion de slots", pref=datetime_pref, slots=slots)
             try:
-                # Convertimos la preferencia a objeto datetime para comparar valor, no string
-                pref_dt = datetime.fromisoformat(datetime_pref.replace("Z", "+00:00"))
+                # 1. Normalizamos la preferencia a 16 caracteres (YYYY-MM-DDTHH:MM)
+                # Esto ignora segundos y diferencias de zona horaria (Z vs -05:00)
+                pref_clean = datetime_pref[:16]
 
                 for s in slots:
                     try:
-                        # Convertimos el slot a objeto datetime
-                        slot_dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                        # 2. Normalizamos el slot del calendario de la misma forma
+                        slot_clean = s[:16]
 
-                        # Comparamos solo año, mes, día, hora y minuto
-                        if (pref_dt.year == slot_dt.year and
-                            pref_dt.month == slot_dt.month and
-                            pref_dt.day == slot_dt.day and
-                            pref_dt.hour == slot_dt.hour and
-                            pref_dt.minute == slot_dt.minute):
-
-                            logger.info("DEBUG_MATCH: ¡MATCH ENCONTRADO!", slot=s, pref=datetime_pref)
+                        # 3. Comparación de strings pura
+                        if pref_clean == slot_clean:
+                            logger.info("DEBUG_MATCH: ¡MATCH EXITOSO!", slot=s, pref=datetime_pref)
                             exact_match = s
                             break
                     except Exception as e:
-                        logger.warning(f"DEBUG_MATCH: Error parseando slot {s}: {e}")
+                        logger.warning(f"Error comparando slot individual {s}: {e}")
+            
             except Exception as e:
-                logger.error(f"DEBUG_MATCH: Error parseando preferencia {datetime_pref}: {e}")
+                logger.error(f"DEBUG_MATCH: Error general en lógica de match: {e}")
 
+        # --- GENERACIÓN DE CONTEXTO PARA EL LLM ---
         readable = _format_slots(preferred_slots[:4])
         context_parts.append(f"Slots disponibles (formato legible): {readable}")
 
@@ -1700,8 +1740,16 @@ async def node_generate_response_with_tools(
             # INSTRUCCIÓN DOMINANTE: Se coloca al inicio para que el LLM no la ignore
             context_parts.insert(0,
                 f"🚨 ORDEN DIRECTA DEL SISTEMA: El horario solicitado ({datetime_pref}) "
-                f"ESTÁ CONFIRMADO COMO DISPONIBLE. Tienes PROHIBIDO decir que no hay disponibilidad. "
-                f"No analices los slots, simplemente confirma la cita al usuario inmediatamente."
+                f"ESTÁ CONFIRMADO COMO DISPONIBLE en el calendario. "
+                f"Tienes PROHIBIDO decir que no hay disponibilidad o que la agenda está llena. "
+                f"Confirma la cita al usuario inmediatamente."
+            )
+        elif slots and len(slots) > 0:
+            # Si hay slots pero no son el exacto, reforzamos que sí hay opciones
+            context_parts.append(
+                f"SITUACIÓN ACTUAL: Hay {len(slots)} espacios disponibles hoy. "
+                "Si el usuario pidió un horario que está en la lista de slots disponibles, "
+                "debes proceder con el agendamiento. No des respuestas negativas genéricas."
             )
 
 
@@ -1873,15 +1921,28 @@ async def node_generate_response_with_tools(
             "Informa al usuario sobre su(s) cita(s) existente(s) y pregunta si desea "
             "reagendar, cancelar o agregar una cita adicional."
         )
-    elif not booking_done and lookup_done and not cal_found and intent == "agendar":
-        # Verificación real en Calendar: NO hay citas previas para este usuario.
-        # CRÍTICO: evitar que el LLM alucine citas basándose en el historial de conversación o memoria semántica.
+    elif not booking_done and lookup_done and not cal_found and existing_appts and intent == "agendar":
+        # Calendar verificado: hay citas futuras pero en OTROS días (sin conflicto hoy).
+        # Informar como contexto SIN bloquear el nuevo agendamiento.
+        lines = []
+        for appt in existing_appts[:2]:
+            svc_name = appt.get("summary", "cita")
+            start_dt = appt.get("start", "")
+            lines.append(f"• {svc_name} — {_format_datetime_readable(start_dt)}")
+        context_parts.append(
+            f"ℹ️ CONTEXTO: El paciente tiene cita(s) en otro(s) día(s):\n"
+            + "\n".join(lines)
+            + "\nEstas citas NO interfieren con el nuevo agendamiento solicitado. "
+            "Procede a agendar la nueva cita para la fecha solicitada. "
+            "Puedes mencionarlas brevemente si es relevante."
+        )
+    elif not booking_done and lookup_done and not cal_found and not existing_appts and intent == "agendar":
+        # Verificación real en Calendar: este usuario no tiene ninguna cita futura.
         context_parts.append(
             "⚠️ VERDAD ABSOLUTA DEL SISTEMA: Se verificó Google Calendar en tiempo real y este usuario "
             "NO tiene ninguna cita activa registrada. "
             "PROHIBIDO decir 'ya tiene una cita' o 'su cita está a las...'. "
-            "Cualquier información en la memoria semántica o historial que sugiera una cita actual es FALSA. "
-            "Informa que no hay citas y procede a agendar la nueva."
+            "Procede directamente a agendar la nueva cita."
         )
 
     if confirmation_sent and ctype == "cancel":
