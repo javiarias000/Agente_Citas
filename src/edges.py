@@ -18,27 +18,30 @@ logger = structlog.get_logger("langgraph.edges")
 def edge_after_check_availability(state: Dict[str, Any]) -> str:
     """
     Después de consultar disponibilidad.
-    Si hay un match exacto con la preferencia del usuario y tenemos los datos,
-    intentamos agendar directamente.
-    CRÍTICO: Si el intent es 'agendar', no permitimos pasar a generate_response
-    si el slot solicitado está libre; debemos forzar el booking.
+    Ir a match_closest_slot para buscar exacto y luego closest.
     """
-    from utils.date_utils import compare_slots
+    return "match_closest_slot"
 
-    available_slots = state.get("available_slots", [])
-    datetime_pref = state.get("datetime_preference")
+
+def edge_after_match_closest_slot(state: Dict[str, Any]) -> str:
+    """
+    Después de buscar closest slot.
+    Si encontró selected_slot (exact o closest) y no hay missing fields,
+    ir directamente a book_appointment.
+    Sino, ir a generate_response para que el LLM ofrezca los slots.
+    """
+    selected_slot = state.get("selected_slot")
     missing = state.get("missing_fields", [])
-    intent = state.get("intent", "")
 
-    if datetime_pref and available_slots and not missing:
-        for s in available_slots:
-            if compare_slots(datetime_pref, s):
-                logger.info("EDGE_MATCH: Match exacto detectado via utils.date_utils. Forzando booking.", pref=datetime_pref, slot=s)
-                return "book_appointment"
+    if selected_slot and not missing:
+        logger.info(
+            "edge_after_match_closest_slot: forzando booking",
+            selected_slot=selected_slot,
+        )
+        return "book_appointment"
 
-    # Si el intent es agendar y el usuario fue específico, pero no hubo match exacto,
-    # vamos a generate_response para que el LLM ofrezca los slots disponibles.
     return "generate_response"
+
 
 def edge_after_route_intent(state: Dict[str, Any]) -> str:
     """

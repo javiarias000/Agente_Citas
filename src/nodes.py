@@ -474,6 +474,61 @@ async def node_check_availability(
         }
 
 
+async def node_match_closest_slot(state: ArcadiumState) -> Dict[str, Any]:
+    """
+    Después de check_availability: si no hay match exacto, buscar closest slot.
+
+    Si datetime_preference no coincide exactamente con ningún slot disponible,
+    pero hay un slot dentro de 60 minutos, setear selected_slot = closest_slot
+    para que se intente el booking automático.
+
+    Sin LLM. Determinista.
+    """
+    from utils.date_utils import compare_slots, find_closest_slot
+
+    logger.info("NODE_MATCH_CLOSEST_SLOT: Iniciando nodo")
+
+    available_slots = state.get("available_slots", [])
+    datetime_pref = state.get("datetime_preference")
+
+    if not datetime_pref or not available_slots:
+        # Sin preferencia o sin slots, no hay nada que hacer
+        return {}
+
+    # Buscar match exacto primero
+    for s in available_slots:
+        if compare_slots(datetime_pref, s):
+            # Match exacto encontrado
+            logger.info(
+                "node_match_closest_slot: match exacto",
+                pref=datetime_pref,
+                slot=s,
+            )
+            return {"selected_slot": s}
+
+    # No hay match exacto, buscar closest dentro de 60 minutos
+    closest = find_closest_slot(datetime_pref, available_slots, max_delta_minutes=60)
+
+    if closest:
+        logger.info(
+            "node_match_closest_slot: closest slot encontrado",
+            pref=datetime_pref,
+            closest=closest,
+        )
+        return {
+            "selected_slot": closest,
+            "preference_adjusted": True,  # Flag para que generate_response sepa que ajustamos
+        }
+
+    # No hay closest slot dentro del rango
+    logger.info(
+        "node_match_closest_slot: sin closest slot en rango",
+        pref=datetime_pref,
+        slots_count=len(available_slots),
+    )
+    return {}
+
+
 async def node_detect_confirmation(state: ArcadiumState) -> Dict[str, Any]:
     """
     Detecta si el usuario confirmó, rechazó, o eligió un slot.

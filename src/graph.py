@@ -41,6 +41,7 @@ def build_graph(
         edge_after_extract_data,
         edge_after_route_intent,
         edge_after_check_availability,
+        edge_after_match_closest_slot,
         edge_after_reschedule_appointment,
     )
 
@@ -60,6 +61,7 @@ def build_graph(
         node_extract_intent,
         node_generate_response_with_tools,
         node_lookup_appointment,
+        node_match_closest_slot,
         node_prepare_modification,
         node_reschedule_appointment,
         node_route_intent,
@@ -85,6 +87,7 @@ def build_graph(
             calendar_services=calendar_services,
         ),
     )
+    graph.add_node("match_closest_slot", node_match_closest_slot)
     graph.add_node("detect_confirmation", node_detect_confirmation)
     graph.add_node("validate_and_confirm", node_validate_and_confirm)
     graph.add_node(
@@ -219,10 +222,13 @@ def build_graph(
         },
     )
 
-    # check_availability → routing (Auto-Booking o generar respuesta)
+    # check_availability → match_closest_slot
+    graph.add_edge("check_availability", "match_closest_slot")
+
+    # match_closest_slot → routing (Auto-Booking con closest slot o generar respuesta)
     graph.add_conditional_edges(
-        "check_availability",
-        edge_after_check_availability,
+        "match_closest_slot",
+        edge_after_match_closest_slot,
         {
             "book_appointment": "book_appointment",
             "generate_response": "generate_response",
