@@ -293,6 +293,11 @@ async def node_entry(
     if updates["conversation_turns"] >= 10:
         updates["should_escalate"] = True
 
+    # Recalcular missing_fields después de cualquier reset o cambio
+    merged_state = {**state, **updates}
+    from src.state import get_missing_fields
+    updates["missing_fields"] = get_missing_fields(merged_state)
+
     return updates
 
 
@@ -417,6 +422,8 @@ async def node_check_availability(
             date=dt.date().isoformat(),
             slots_count=len(slots),
             first_slot=str(slots[0]) if slots else "ninguno",
+            service_duration=duration,
+            doctor_email=state.get("doctor_email", "unknown"),
         )
 
         # Hora actual en Ecuador para filtrar slots ya pasados
