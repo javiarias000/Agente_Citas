@@ -244,7 +244,8 @@ class ComposioCalendarService:
             "create_event",
             title=title,
             start=local_start.isoformat(),
-            duration_min=duration_minutes,
+            duration_hours=duration_hours,
+            duration_mins=duration_mins_remainder,
         )
 
         data = await self._execute_async("GOOGLECALENDAR_CREATE_EVENT", args)

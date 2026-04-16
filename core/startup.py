@@ -56,46 +56,42 @@ def validate_environment() -> Tuple[bool, List[str]]:
     return len(errors) == 0, errors
 
 
-def validate_database() -> Tuple[bool, List[str]]:
+async def validate_database() -> Tuple[bool, List[str]]:
     """
     Verifica que la BD esté accesible y las migraciones estén aplicadas.
     """
-    import asyncio
     from sqlalchemy import text
     from core.config import get_settings
     from core.orchestrator import Database
 
-    async def _check_db():
-        errors = []
-        try:
-            settings = get_settings()
-            db = Database(settings.DATABASE_URL)
+    errors = []
+    try:
+        settings = get_settings()
+        db = Database(settings.DATABASE_URL)
 
-            # Test connection
-            async with db.engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-                logger.info("✅ Database connection OK")
+        # Test connection
+        async with db.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            logger.info("✅ Database connection OK")
 
-            # Check required tables
-            async with db.engine.begin() as conn:
-                result = await conn.execute(
-                    text("""
-                    SELECT table_name FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                    """)
-                )
-                tables = {row[0] for row in result.fetchall()}
-                required = {"conversations", "messages", "appointments"}
-                missing = required - tables
-                if missing:
-                    errors.append(f"Tablas faltantes: {missing}. Ejecuta: alembic upgrade head")
+        # Check required tables
+        async with db.engine.begin() as conn:
+            result = await conn.execute(
+                text("""
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public'
+                """)
+            )
+            tables = {row[0] for row in result.fetchall()}
+            required = {"conversations", "messages", "appointments"}
+            missing = required - tables
+            if missing:
+                errors.append(f"Tablas faltantes: {missing}. Ejecuta: alembic upgrade head")
 
-            await db.engine.dispose()
-            return len(errors) == 0, errors
-        except Exception as e:
-            return False, [f"Error BD: {str(e)}"]
-
-    return asyncio.run(_check_db())
+        await db.engine.dispose()
+        return len(errors) == 0, errors
+    except Exception as e:
+        return False, [f"Error BD: {str(e)}"]
 
 
 def validate_external_services() -> Tuple[bool, List[str]]:
@@ -128,61 +124,62 @@ def validate_external_services() -> Tuple[bool, List[str]]:
     return len(errors) == 0, errors
 
 
-def validate_migrations() -> Tuple[bool, List[str]]:
+async def validate_migrations() -> Tuple[bool, List[str]]:
     """
     Verifica que todas las migraciones hayan sido aplicadas.
     """
-    import asyncio
     from sqlalchemy import text
     from core.config import get_settings
     from core.orchestrator import Database
 
-    async def _check_migrations():
-        try:
-            settings = get_settings()
-            db = Database(settings.DATABASE_URL)
+    try:
+        settings = get_settings()
+        db = Database(settings.DATABASE_URL)
 
-            async with db.engine.connect() as conn:
-                result = await conn.execute(
-                    text("SELECT version_num FROM alembic_version")
-                )
-                row = result.fetchone()
-                if row:
-                    logger.info(f"✅ Última migración aplicada: {row[0]}")
-                    return True, []
-                else:
-                    return False, ["No se encontraron migraciones aplicadas. Ejecuta: alembic upgrade head"]
+        async with db.engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT name FROM schema_migrations ORDER BY id DESC LIMIT 1")
+            )
+            row = result.fetchone()
+            if row:
+                logger.info(f"✅ Última migración aplicada: {row[0]}")
+                return True, []
+            else:
+                return False, ["No se encontraron migraciones aplicadas. Ejecuta: ./run.sh migrate"]
 
-            await db.engine.dispose()
-        except Exception as e:
-            # Si la tabla no existe aún, probablemente es la primera ejecución
-            if "alembic_version" in str(e):
-                return False, ["Migraciones no inicializadas. Ejecuta: alembic upgrade head"]
-            return False, [f"Error verificando migraciones: {str(e)}"]
-
-    return asyncio.run(_check_migrations())
+        await db.engine.dispose()
+    except Exception as e:
+        # Si la tabla no existe aún, probablemente es la primera ejecución
+        if "schema_migrations" in str(e):
+            return False, ["Migraciones no inicializadas. Ejecuta: ./run.sh migrate"]
+        return False, [f"Error verificando migraciones: {str(e)}"]
 
 
-def run_startup_checks() -> bool:
+async def run_startup_checks() -> bool:
     """
     Ejecuta todos los checks de startup. Retorna True si todo está OK.
     """
+    import asyncio
+
     logger.info("🚀 Ejecutando checks de startup...")
 
     checks = [
-        ("Entorno", validate_environment),
-        ("Base de datos", validate_database),
-        ("Servicios externos", validate_external_services),
-        ("Migraciones", validate_migrations),
+        ("Entorno", validate_environment, False),  # sync
+        ("Base de datos", validate_database, True),  # async
+        ("Servicios externos", validate_external_services, False),  # sync
+        ("Migraciones", validate_migrations, True),  # async
     ]
 
     all_passed = True
     total_errors = 0
 
-    for check_name, check_func in checks:
+    for check_name, check_func, is_async in checks:
         try:
             logger.info(f"📋 Validando {check_name}...")
-            passed, errors = check_func()
+            if is_async:
+                passed, errors = await check_func()
+            else:
+                passed, errors = check_func()
 
             if passed:
                 logger.info(f"✅ {check_name}: OK")

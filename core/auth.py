@@ -6,7 +6,8 @@ Requiere API_KEY en header Authorization: Bearer <token>
 
 from typing import Optional
 from fastapi import HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthCredentials
+from fastapi.security import HTTPBearer
+from fastapi.security.http import HTTPAuthorizationCredentials
 import structlog
 
 logger = structlog.get_logger("auth")
@@ -14,7 +15,7 @@ logger = structlog.get_logger("auth")
 security = HTTPBearer()
 
 
-async def verify_api_token(credentials: HTTPAuthCredentials = Depends(security)) -> str:
+async def verify_api_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """
     Verifica token Bearer en header Authorization.
     Retorna el token si es válido, sino lanza HTTPException 401.
@@ -41,7 +42,7 @@ async def verify_api_token(credentials: HTTPAuthCredentials = Depends(security))
 
 
 async def verify_api_token_optional(
-    credentials: Optional[HTTPAuthCredentials] = Depends(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ) -> Optional[str]:
     """
     Verifica token Bearer si está presente, pero no lo requiere.

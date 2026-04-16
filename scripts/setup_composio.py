@@ -101,12 +101,25 @@ async def main():
 
     # ── Paso 3: Buscar auth_config de Google Calendar ─────────────
     print("PASO 3: Buscando configuración de Google Calendar en Composio...")
+    configs_list = []
     try:
         auth_configs = client.auth_configs.list(toolkit_slug="googlecalendar")
-        configs_list = list(auth_configs)
+        response_dict = auth_configs if isinstance(auth_configs, dict) else dict(auth_configs)
+
+        # Extract items from paginated response
+        items = response_dict.get('items', [])
+        if items:
+            configs_list = items
+
         print(f"  Configuraciones encontradas: {len(configs_list)}")
         for cfg in configs_list[:5]:
-            print(f"    - ID: {cfg.id}  |  Name: {getattr(cfg, 'name', 'N/A')}  |  Status: {getattr(cfg, 'status', 'N/A')}")
+            # Handle object or dict
+            if isinstance(cfg, dict):
+                print(f"    - ID: {cfg.get('id', 'N/A')}  |  Name: {cfg.get('name', 'N/A')}")
+            else:
+                cfg_id = getattr(cfg, 'id', 'N/A')
+                cfg_name = getattr(cfg, 'name', 'N/A')
+                print(f"    - ID: {cfg_id}  |  Name: {cfg_name}")
     except Exception as e:
         print(f"  [WARN] No se pudo listar auth_configs: {e}")
         configs_list = []
@@ -121,16 +134,24 @@ async def main():
             user_ids=[user_id],
             statuses=["ACTIVE"],
         )
-        connected_list = list(connected)
-        user_connections = connected_list  # ya filtrado por user_id
+
+        # Extract items from paginated response
+        response_dict = connected if isinstance(connected, dict) else dict(connected)
+        user_connections = response_dict.get('items', [])
+
         if user_connections:
             print(f"  ✓ Ya existe una conexión de Google Calendar para user_id='{user_id}'")
             for conn in user_connections:
-                print(f"    - Connection ID: {conn.id}  |  Status: {getattr(conn, 'status', 'N/A')}")
+                # Handle both dict and object responses
+                if isinstance(conn, dict):
+                    print(f"    - Connection ID: {conn.get('id', 'N/A')}  |  Status: {conn.get('status', 'N/A')}")
+                else:
+                    conn_id = getattr(conn, 'id', 'N/A')
+                    conn_status = getattr(conn, 'status', 'N/A')
+                    print(f"    - Connection ID: {conn_id}  |  Status: {conn_status}")
             connection_exists = True
         else:
             print(f"  ✗ No hay conexión de Google Calendar para user_id='{user_id}'")
-            print(f"    (Encontradas {len(connected_list)} conexiones en total, ninguna para este user_id)")
     except Exception as e:
         print(f"  [WARN] No se pudo verificar conexiones: {e}")
     print()
@@ -141,20 +162,42 @@ async def main():
 
         auth_config_id = None
         if configs_list:
-            # Usar el primer auth_config de googlecalendar
-            auth_config_id = configs_list[0].id
-            print(f"  Usando auth_config: {auth_config_id}")
-        else:
-            # Intentar usar el slug directamente
+            # Extraer ID del primer auth_config (puede ser dict, tuple u objeto)
+            cfg = configs_list[0]
+            if isinstance(cfg, dict):
+                auth_config_id = cfg.get('id')
+            elif isinstance(cfg, tuple) and len(cfg) > 0 and isinstance(cfg[0], dict):
+                auth_config_id = cfg[0].get('id')
+            elif hasattr(cfg, 'id'):
+                auth_config_id = cfg.id
+
+            if auth_config_id:
+                print(f"  Usando auth_config: {auth_config_id}")
+            else:
+                print(f"  [WARN] No se pudo extraer auth_config_id. Tipo: {type(cfg)}, Contenido: {cfg}")
+
+        if not auth_config_id:
             print("  Intentando con slug 'googlecalendar' directamente...")
             auth_config_id = "googlecalendar"
 
         try:
+            print(f"  Creando link con auth_config_id='{auth_config_id}', user_id='{user_id}'...")
             link_resp = client.link.create(
                 auth_config_id=auth_config_id,
                 user_id=user_id,
             )
-            auth_url = link_resp.url if hasattr(link_resp, 'url') else str(link_resp)
+
+            # Extraer URL de la respuesta (puede ser objeto o dict)
+            auth_url = None
+            if hasattr(link_resp, 'redirect_url'):
+                auth_url = link_resp.redirect_url
+            elif hasattr(link_resp, 'url'):
+                auth_url = link_resp.url
+            elif isinstance(link_resp, dict):
+                auth_url = link_resp.get('redirect_url') or link_resp.get('url')
+
+            if not auth_url:
+                auth_url = str(link_resp)
 
             print()
             print("  " + "=" * 56)
@@ -164,18 +207,29 @@ async def main():
             print()
             print("  " + "=" * 56)
             print()
-            input("  Presiona ENTER después de completar la autenticación en el navegador...")
+            try:
+                input("  Presiona ENTER después de completar la autenticación en el navegador...")
+            except EOFError:
+                print("  (No interactive mode - skipping wait)")
             print()
         except Exception as e:
             print(f"  [ERROR] No se pudo crear el link de autenticación: {e}")
             print()
-            print("  Alternativa manual:")
+            print("  Datos de depuración:")
+            print(f"    - auth_config_id: {auth_config_id}")
+            print(f"    - user_id: {user_id}")
+            print(f"    - configs_list: {len(configs_list) if configs_list else 0} configs encontrados")
+            print()
+            print("  SOLUCIÓN: Conecta Google Calendar manualmente:")
             print("  1. Ve a https://app.composio.dev")
             print("  2. Dashboard → Apps → Google Calendar")
             print("  3. Haz clic en 'Connect'")
             print("  4. Completa la autenticación OAuth con Google")
             print()
-            input("  Presiona ENTER cuando hayas completado la autenticación en el dashboard...")
+            try:
+                input("  Presiona ENTER cuando hayas completado la autenticación en el dashboard...")
+            except EOFError:
+                print("  (No interactive mode - skipping wait)")
             print()
     else:
         print("PASO 5: Conexión ya existe — omitiendo autenticación.")
@@ -194,9 +248,22 @@ async def main():
             user_id=user_id,
             toolkits={"enable": ["googlecalendar"]},
         )
-        print(f"  ✓ Sesión MCP creada: {session.session_id}")
-        print(f"  ✓ URL MCP: {session.mcp.url[:60]}...")
-        print(f"  ✓ Tools disponibles: {session.tool_router_tools[:5]}{'...' if len(session.tool_router_tools) > 5 else ''}")
+
+        # Handle both dict and object responses
+        if isinstance(session, dict):
+            session_id = session.get('session_id')
+            mcp_url = session.get('mcp', {}).get('url') if isinstance(session.get('mcp'), dict) else getattr(session.get('mcp'), 'url', 'N/A')
+            tools = session.get('tool_router_tools', [])
+        else:
+            session_id = getattr(session, 'session_id', 'N/A')
+            mcp_url = getattr(session.mcp, 'url', 'N/A') if hasattr(session, 'mcp') else 'N/A'
+            tools = getattr(session, 'tool_router_tools', [])
+
+        print(f"  ✓ Sesión MCP creada: {session_id}")
+        if mcp_url != 'N/A':
+            print(f"  ✓ URL MCP: {mcp_url[:60]}...")
+        if tools:
+            print(f"  ✓ Tools disponibles: {tools[:5]}{'...' if len(tools) > 5 else ''}")
         print()
 
         # ── Paso 8: Cargar tools MCP y verificar Google Calendar ──

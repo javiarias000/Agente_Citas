@@ -217,6 +217,7 @@ async def node_entry(
         "_extract_data_calls": 0,
         "_tool_iterations": 0,
         "_slots_checked": False,  # se activa solo cuando node_check_availability corre
+        "_calendar_refreshed": True,  # indica que se debe refrescar info del calendario
     }
 
     # Obtener el mensaje nuevo desde _incoming_message (enviado por agent.py)
@@ -321,10 +322,22 @@ async def node_route_intent(state: ArcadiumState) -> Dict[str, Any]:
     ):
         detected = existing_intent
 
-    return {
+    updates: Dict[str, Any] = {
         "intent": detected,
         "current_step": "route_intent_done",
     }
+
+    # Limpiar bandera de refresco de calendario después de detectar intent
+    if state.get("_calendar_refreshed"):
+        updates["_calendar_refreshed"] = False
+
+    logger.info(
+        "node_route_intent: intent detectado",
+        intent=detected,
+        text_preview=text[:60],
+    )
+
+    return updates
 
 
 async def node_check_missing(state: ArcadiumState) -> Dict[str, Any]:
@@ -731,10 +744,15 @@ async def node_book_appointment(
             "current_step": "resolution",
             # Registrar el slot que se agendó (para contexto del LLM en respuesta)
             "selected_slot": slot,
+            # Indicar que hay una cita (la que acaba de crearse)
+            "has_appointment": True,
             # Limpiar estado de selección para no reutilizar en próximos turnos
             "awaiting_confirmation": False,
             "available_slots": [],
             "confirmation_type": None,
+            # Limpiar errores previos — la cita se creó exitosamente
+            "last_error": None,
+            "should_escalate": False,
         }
 
     except Exception as e:
@@ -790,6 +808,10 @@ async def node_cancel_appointment(
             "appointment_id": None,
             "google_event_id": None,
             "google_event_link": None,
+            # Limpiar citas existentes para que el LLM vea que no hay citas
+            "existing_appointments": [],
+            # Indicar que no hay citas después de cancelar
+            "has_appointment": False,
         }
 
     except Exception as e:

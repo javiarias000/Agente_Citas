@@ -22,6 +22,33 @@ async def run_orchestrator():
     app = api.create_app()
 
     import uvicorn
+    import socket
+    import time
+
+    # Intentar limpiar el puerto si está en uso (TIME_WAIT desde shutdown anterior)
+    def wait_for_port_available(host: str, port: int, timeout: int = 5):
+        """Espera a que el puerto esté disponible con reintentos"""
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((host, port))
+                sock.close()
+                return True
+            except OSError as e:
+                if "Address already in use" in str(e):
+                    time.sleep(0.5)
+                    continue
+                raise
+        return False
+
+    # Esperar a que puerto esté disponible
+    if not wait_for_port_available(settings.HOST, settings.PORT):
+        print(f"❌ Puerto {settings.PORT} no está disponible después de esperar.")
+        print(f"   Ejecuta: fuser -k {settings.PORT}/tcp")
+        sys.exit(1)
+
     config = uvicorn.Config(
         app=app,
         host=settings.HOST,

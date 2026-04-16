@@ -235,6 +235,14 @@ class ArcadiumAPI:
             )
         except ImportError:
             logger.warning("prometheus_client no instalado, métricas deshabilitadas")
+        except OSError as e:
+            if "Address already in use" in str(e):
+                logger.warning(
+                    "Puerto de métricas ya en uso (otra instancia ejecutándose)",
+                    port=self.settings.METRICS_PORT
+                )
+            else:
+                raise
 
     async def _init_langgraph(self) -> None:
         try:
@@ -423,7 +431,7 @@ class ArcadiumAPI:
         async def lifespan(app: FastAPI):
             try:
                 # Run startup checks before initializing
-                run_startup_checks()
+                await run_startup_checks()
                 await self.initialize()
                 app.state.api = self
                 logger.info("✅ Servidor iniciado correctamente")

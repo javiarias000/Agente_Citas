@@ -153,7 +153,19 @@ def build_graph(
     graph.add_edge(START, "entry")
 
     # entry → route_intent (siempre)
-    graph.add_edge("entry", "route_intent")
+    # entry → siempre verificar calendario si hay paciente identificado
+    # Esto asegura que el contexto siempre tenga info ACTUAL del calendario,
+    # incluso si el usuario eliminó manualmente una cita o la agenda cambió
+    graph.add_conditional_edges(
+        "entry",
+        lambda s: "check_existing_appointment"
+        if (s.get("phone_number") or s.get("patient_name"))
+        else "route_intent",
+        {
+            "check_existing_appointment": "check_existing_appointment",
+            "route_intent": "route_intent",
+        },
+    )
 
     # route_intent → routing edge
     graph.add_conditional_edges(
@@ -170,14 +182,27 @@ def build_graph(
         },
     )
 
-    # check_existing_appointment → routing según intent + resultado Calendar
+    # check_existing_appointment → routing según contexto
+    def edge_after_check_existing_or_refresh(state):
+        """
+        Si viene desde 'entry' (refresh de calendario), ir a 'route_intent' para detectar intent.
+        Si viene desde 'extract_intent' (intent ya detectado), usar lógica normal de check_existing.
+        """
+        # Si _calendar_refreshed es True, viene desde entry (solo para refrescar info)
+        if state.get("_calendar_refreshed"):
+            # La bandera se limpió automáticamente en node_entry, solo vamos a route_intent
+            return "route_intent"
+        # Sino, usar la lógica normal de check_existing
+        return edge_after_check_existing(state)
+
     graph.add_conditional_edges(
         "check_existing_appointment",
-        edge_after_check_existing,
+        edge_after_check_existing_or_refresh,
         {
             "check_missing": "check_missing",       # agendar, sin cita existente
             "prepare_modification": "prepare_modification",  # cancelar/reagendar, cita encontrada
             "generate_response": "generate_response",  # agendar con cita existente, o sin cita
+            "route_intent": "route_intent",  # entrada desde "entry" para detectar intent
         },
     )
 

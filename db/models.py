@@ -751,8 +751,8 @@ class UserProject(Base):
     )
 
     # Relaciones
-    user: Mapped["User"] = relationship()
-    project: Mapped["Project"] = relationship()
+    user: Mapped["User"] = relationship(overlaps="projects,users")
+    project: Mapped["Project"] = relationship(overlaps="users,projects")
 
     def __repr__(self) -> str:
         return f"<UserProject(user={self.user_id}, project={self.project_id}, role={self.role_in_project})>"
