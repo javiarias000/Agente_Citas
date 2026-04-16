@@ -13,9 +13,6 @@ from typing import Dict, Any, List, Optional
 
 from zoneinfo import ZoneInfo
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
-from googleapiclient.errors import HttpError
-
 logger = structlog.get_logger("langgraph.calendar")
 TIMEZONE = ZoneInfo("America/Guayaquil")
 BUSINESS_START = 9
@@ -35,11 +32,6 @@ class GoogleCalendarService:
         self._svc = calendar_service
         self._db = db_service
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(lambda e: isinstance(e, HttpError)),
-    )
     async def get_available_slots(
         self,
         date: datetime,
@@ -70,11 +62,6 @@ class GoogleCalendarService:
             logger.error("Error obteniendo slots", error=str(e))
             return []
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(lambda e: isinstance(e, HttpError)),
-    )
     async def search_events_by_query(
         self,
         q: str,
@@ -108,11 +95,6 @@ class GoogleCalendarService:
             logger.error("Error en search_events_by_query", q=q, error=str(e))
             return []
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(lambda e: isinstance(e, HttpError)),
-    )
     async def create_event(
         self,
         start: datetime,
@@ -137,21 +119,11 @@ class GoogleCalendarService:
         logger.info("Evento creado", event_id=event_id, link=html_link)
         return event_id, html_link
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(lambda e: isinstance(e, HttpError)),
-    )
     async def delete_event(self, event_id: str) -> bool:
         success = await self._svc.delete_event(event_id)
         logger.info("Evento eliminado", event_id=event_id, success=success)
         return bool(success)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(lambda e: isinstance(e, HttpError)),
-    )
     async def update_event(
         self,
         event_id: str,
