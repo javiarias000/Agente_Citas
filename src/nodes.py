@@ -464,64 +464,70 @@ async def node_check_availability(
             slots_iso.append(slot_iso)
 
         if not slots_iso:
-            # Fallback: intentar próximo día hábil
-            next_dt = dt + timedelta(days=1)
-            if next_dt.weekday() >= 5:  # Si es fin de semana, saltar al lunes
-                days_to_monday = 7 - next_dt.weekday()
-                next_dt = next_dt + timedelta(days=days_to_monday)
+            # Fallback: intentar próximos 5 días hábiles
+            for days_ahead in range(1, 6):
+                try:
+                    next_dt = dt + timedelta(days=days_ahead)
+                    # Saltar fines de semana
+                    if next_dt.weekday() >= 5:
+                        days_to_add = 7 - next_dt.weekday()
+                        next_dt = next_dt + timedelta(days=days_to_add)
 
-            try:
-                next_dt_date = next_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-                next_slots = await calendar_service.get_available_slots(
-                    date=next_dt_date,
-                    duration_minutes=duration,
-                )
-                next_slots_iso = []
-                for s in next_slots:
-                    if isinstance(s, dict):
-                        start = s.get("start")
-                        slot_iso = start.isoformat() if isinstance(start, datetime) else str(start)
-                    else:
-                        slot_iso = str(s)
-                    try:
-                        slot_dt = datetime.fromisoformat(str(slot_iso))
-                        if slot_dt.tzinfo is not None:
-                            if slot_dt <= now_ec:
-                                continue
-                        else:
-                            if slot_dt <= now_ec.replace(tzinfo=None):
-                                continue
-                    except:
-                        pass
-                    next_slots_iso.append(slot_iso)
-
-                if next_slots_iso:
-                    logger.info(
-                        "node_check_availability: fallback a próximo día",
-                        original_date=dt.date().isoformat(),
-                        fallback_date=next_dt.date().isoformat(),
-                        slots_found=len(next_slots_iso),
+                    next_dt_date = next_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    next_slots = await calendar_service.get_available_slots(
+                        date=next_dt_date,
+                        duration_minutes=duration,
                     )
-                    return {
-                        "available_slots": next_slots_iso,
-                        "_slots_checked": True,
-                        "datetime_preference": next_dt_date.isoformat(),  # Actualizar preferencia
-                        "current_step": "awaiting_selection",
-                        "awaiting_confirmation": True,
-                        "confirmation_type": "book",
-                        "last_error": f"Sin disponibilidad en {dt.strftime('%Y-%m-%d')}. Mostrando opciones para {next_dt.strftime('%Y-%m-%d')}.",
-                    }
-            except Exception as fallback_err:
-                logger.warning(
-                    "node_check_availability: fallback falló",
-                    error=str(fallback_err),
-                )
 
-            # Si fallback también falló, retornar error
+                    next_slots_iso = []
+                    for s in next_slots:
+                        if isinstance(s, dict):
+                            start = s.get("start")
+                            slot_iso = start.isoformat() if isinstance(start, datetime) else str(start)
+                        else:
+                            slot_iso = str(s)
+                        try:
+                            slot_dt = datetime.fromisoformat(str(slot_iso))
+                            if slot_dt.tzinfo is not None:
+                                if slot_dt <= now_ec:
+                                    continue
+                            else:
+                                if slot_dt <= now_ec.replace(tzinfo=None):
+                                    continue
+                        except:
+                            pass
+                        next_slots_iso.append(slot_iso)
+
+                    if next_slots_iso:
+                        logger.info(
+                            "node_check_availability: fallback encontró slots",
+                            original_date=dt.date().isoformat(),
+                            fallback_date=next_dt.date().isoformat(),
+                            days_ahead=days_ahead,
+                            slots_found=len(next_slots_iso),
+                        )
+                        return {
+                            "available_slots": next_slots_iso,
+                            "_slots_checked": True,
+                            "datetime_preference": next_dt_date.isoformat(),
+                            "current_step": "awaiting_selection",
+                            "awaiting_confirmation": True,
+                            "confirmation_type": "book",
+                            "last_error": f"Sin disponibilidad en {dt.strftime('%d/%m')}. Opciones disponibles el {next_dt.strftime('%d/%m')}.",
+                        }
+                except Exception as fallback_err:
+                    logger.warning(
+                        "node_check_availability: fallback intento falló",
+                        days_ahead=days_ahead,
+                        error=str(fallback_err),
+                    )
+                    continue
+
+            # Sin slots en próximos 5 días
             return {
                 "available_slots": [],
                 "_slots_checked": True,
-                "last_error": "No hay slots disponibles. Por favor intente otra fecha.",
+                "last_error": "Sin disponibilidad en próximos días. Por favor intente otra fecha o llame a la clínica.",
             }
 
         logger.info(
