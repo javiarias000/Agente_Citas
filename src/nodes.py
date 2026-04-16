@@ -464,10 +464,64 @@ async def node_check_availability(
             slots_iso.append(slot_iso)
 
         if not slots_iso:
+            # Fallback: intentar próximo día hábil
+            next_dt = dt + timedelta(days=1)
+            if next_dt.weekday() >= 5:  # Si es fin de semana, saltar al lunes
+                days_to_monday = 7 - next_dt.weekday()
+                next_dt = next_dt + timedelta(days=days_to_monday)
+
+            try:
+                next_dt_date = next_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                next_slots = await calendar_service.get_available_slots(
+                    date=next_dt_date,
+                    duration_minutes=duration,
+                )
+                next_slots_iso = []
+                for s in next_slots:
+                    if isinstance(s, dict):
+                        start = s.get("start")
+                        slot_iso = start.isoformat() if isinstance(start, datetime) else str(start)
+                    else:
+                        slot_iso = str(s)
+                    try:
+                        slot_dt = datetime.fromisoformat(str(slot_iso))
+                        if slot_dt.tzinfo is not None:
+                            if slot_dt <= now_ec:
+                                continue
+                        else:
+                            if slot_dt <= now_ec.replace(tzinfo=None):
+                                continue
+                    except:
+                        pass
+                    next_slots_iso.append(slot_iso)
+
+                if next_slots_iso:
+                    logger.info(
+                        "node_check_availability: fallback a próximo día",
+                        original_date=dt.date().isoformat(),
+                        fallback_date=next_dt.date().isoformat(),
+                        slots_found=len(next_slots_iso),
+                    )
+                    return {
+                        "available_slots": next_slots_iso,
+                        "_slots_checked": True,
+                        "datetime_preference": next_dt_date.isoformat(),  # Actualizar preferencia
+                        "current_step": "awaiting_selection",
+                        "awaiting_confirmation": True,
+                        "confirmation_type": "book",
+                        "last_error": f"Sin disponibilidad en {dt.strftime('%Y-%m-%d')}. Mostrando opciones para {next_dt.strftime('%Y-%m-%d')}.",
+                    }
+            except Exception as fallback_err:
+                logger.warning(
+                    "node_check_availability: fallback falló",
+                    error=str(fallback_err),
+                )
+
+            # Si fallback también falló, retornar error
             return {
                 "available_slots": [],
-                "_slots_checked": True,  # check_availability corrió; no había slots
-                "last_error": "No hay slots disponibles para esa fecha. Por favor elija otra fecha u horario.",
+                "_slots_checked": True,
+                "last_error": "No hay slots disponibles. Por favor intente otra fecha.",
             }
 
         logger.info(
@@ -1609,7 +1663,13 @@ async def node_extract_data(
                 updates["service_duration"] = 60
 
     if data.get("datetime_iso"):
-        updates["datetime_preference"] = data["datetime_iso"]
+        old_datetime = state.get("datetime_preference")
+        new_datetime = data["datetime_iso"]
+        if old_datetime != new_datetime:
+            # Usuario cambió de fecha → limpiar slots para forzar regeneración
+            updates["available_slots"] = []
+            updates["awaiting_confirmation"] = False
+        updates["datetime_preference"] = new_datetime
 
     if data.get("patient_name"):
         updates["patient_name"] = data["patient_name"]
@@ -1683,16 +1743,16 @@ def _build_llm_context(state: ArcadiumState) -> Dict[str, Any]:
     }
 
     # 2. Estado de Disponibilidad
-    # Si la operación fue confirmada, el slot relevante es el AGENDADO (selected_slot),
-    # no la preferencia original. Mostramos booked_slot para que el LLM no confunda
-    # la preferencia (ej. 10:00) con el slot real (ej. 12:00).
+    # Mostrar slots disponibles SIEMPRE (incluso post-confirmación) para que LLM
+    # pueda ofrecer alternativas si usuario pregunta "¿otra cita?".
+    # booked_slot = el slot que se agendó (si hay)
     confirmed = state.get("confirmation_sent", False)
     booked_slot = state.get("selected_slot") if confirmed else None
     availability_truth = {
-        "slots_available": [] if confirmed else state.get("available_slots", []),
+        "slots_available": state.get("available_slots", []),
         "preference_match": False,
-        "requested_datetime": None if confirmed else state.get("datetime_preference"),
-        "booked_slot": booked_slot,  # None cuando no hay booking aún
+        "requested_datetime": state.get("datetime_preference"),
+        "booked_slot": booked_slot,
     }
 
     if availability_truth["requested_datetime"] and availability_truth["slots_available"]:

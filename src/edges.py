@@ -46,57 +46,48 @@ def edge_after_match_closest_slot(state: Dict[str, Any]) -> str:
 def edge_after_route_intent(state: Dict[str, Any]) -> str:
     """
     PRIORIDAD MÁXIMA: si estamos esperando selección/confirmación de un slot
-    (awaiting_confirmation=True), el mensaje del usuario debe ir a detect_confirmation
-    independientemente de su intent. Esto evita el bug donde el Turn 2 ("a las 10:00")
-    vuelve al inicio del flujo (check_missing → check_availability) en lugar de
-    procesar la selección del usuario y llamar a book_appointment.
+    (awaiting_confirmation=True Y available_slots no vacío), ir a detect_confirmation.
 
-    Excepción: si el usuario cambia explícitamente de intención a cancelar/reagendar,
-    dejamos que el flujo de modificación tome precedencia.
+    FIX: Si awaiting_confirmation=True pero available_slots está vacío, significa que
+    la búsqueda anterior falló. No ir a detect_confirmation; regenerar slots.
+
+    Excepción: si el usuario cambia explícitamente de intención a cancelar/reagendar.
     """
     intent = state.get("intent")
     awaiting = state.get("awaiting_confirmation", False)
     ctype = state.get("confirmation_type")
+    slots = state.get("available_slots", [])
 
-    # Si esperamos selección de slot o confirmación para agendar,
-    # y el usuario no está cambiando a un flujo diferente (cancelar/reagendar).
-    # Excepción: si hay available_slots ya ofrecidos, el usuario probablemente
-    # está confirmando/eligiendo un slot (ej: dijo "Si" y el LLM clasifica
-    # "reagendar" por contexto). En ese caso, priorizar detect_confirmation.
-    if awaiting and ctype in ("book", None) and intent not in ("cancelar", "reagendar"):
+    # Si esperamos selección Y HAY SLOTS, ir a detect_confirmation
+    # (usuario está eligiendo entre opciones)
+    if awaiting and slots and ctype in ("book", None) and intent not in ("cancelar", "reagendar"):
         return "detect_confirmation"
 
-    # Si hay slots disponibles y el usuario está esperando confirmar/elegir,
-    # enrutar a detect_confirmation aunque el LLM haya devuelto "reagendar".
-    # Esto evita que "Si" (confirmación) reinicie el flujo de modificación.
-    if awaiting and state.get("available_slots") and intent == "reagendar":
+    # Si esperamos selección pero NO HAY SLOTS (búsqueda anterior falló),
+    # necesitamos regenerar. Ir a check_missing para reintentar con nueva fecha.
+    if awaiting and not slots and ctype in ("book", None) and intent == "agendar":
+        logger.info("edge_after_route_intent: reintentando búsqueda tras fallo anterior")
+        return "check_missing"
+
+    # Si hay slots y awaiting confirmación de modificación, ir a detect_confirmation
+    if awaiting and slots and intent == "reagendar":
         return "detect_confirmation"
 
     # Si esperamos confirmación de cancel o reschedule
     if awaiting and ctype in ("cancel", "reschedule"):
         return "detect_confirmation"
 
-    # GUARDIA DE SEGURIDAD: si hay slots disponibles Y awaiting_confirmation=True
-    # (de un turno previo), tratar el mensaje como confirmación/selección.
-    # FIX: requiere awaiting_confirmation=True — sin esta condición, slots rancios
-    # de sesiones anteriores atrapaban nuevas conversaciones enviándolas a detect_confirmation
-    # aunque el usuario estuviera iniciando un flujo completamente diferente.
-    if state.get("available_slots") and state.get("awaiting_confirmation") and intent not in ("cancelar", "reagendar"):
-        return "detect_confirmation"
-
     if not intent:
-        return "extract_intent"  # Fallback LLM
+        return "extract_intent"
 
-    # Forcing tool: verificar Calendar antes de operar sobre citas
+    # Forcing tool: verificar Calendar antes de operar
     if intent in ("agendar", "cancelar", "reagendar"):
-        # PRIORIDAD: Primero check_existing para saber el estado actual del paciente
         return "check_existing_appointment"
 
     if intent == "consultar":
-        # Si es consulta general de disponibilidad, vamos directo
         return "check_availability"
 
-    return "generate_response"  # "otro" o no reconocido
+    return "generate_response"
 
 
 def edge_after_check_missing(state: Dict[str, Any]) -> str:
