@@ -152,20 +152,10 @@ def build_graph(
     # ── Edges: entrada siempre → entry ───────────────────────
     graph.add_edge(START, "entry")
 
-    # entry → route_intent (siempre)
-    # entry → siempre verificar calendario si hay paciente identificado
-    # Esto asegura que el contexto siempre tenga info ACTUAL del calendario,
-    # incluso si el usuario eliminó manualmente una cita o la agenda cambió
-    graph.add_conditional_edges(
-        "entry",
-        lambda s: "check_existing_appointment"
-        if (s.get("phone_number") or s.get("patient_name"))
-        else "route_intent",
-        {
-            "check_existing_appointment": "check_existing_appointment",
-            "route_intent": "route_intent",
-        },
-    )
+    # entry → route_intent (SIEMPRE)
+    # IMPORTANTE: route_intent debe ejecutarse primero para detectar el intent del usuario.
+    # Solo después tenemos la intención y podemos decidir si pasar por check_existing_appointment.
+    graph.add_edge("entry", "route_intent")
 
     # route_intent → routing edge
     graph.add_conditional_edges(
