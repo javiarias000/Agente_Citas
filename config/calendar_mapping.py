@@ -417,3 +417,22 @@ def list_all_services_with_details() -> list[dict]:
         except ValueError:
             continue
     return result
+
+
+def get_doctor_emails() -> list[str]:
+    """
+    Lee DOCTOR_CALENDAR_EMAILS del entorno. Si no existe, deduce los emails únicos
+    desde SERVICE_TO_DENTIST. Esto asegura que si alguien despliega sin actualizar
+    el .env, el sistema sigue funcionando.
+
+    Returns:
+        Lista de emails de doctores registrados en Composio
+    """
+    import os
+
+    env_val = os.getenv("DOCTOR_CALENDAR_EMAILS", "")
+    if env_val.strip():
+        return [e.strip() for e in env_val.split(",") if e.strip()]
+
+    # Fallback: deducir emails únicos del mapeo de servicios
+    return list(dict.fromkeys(SERVICE_TO_DENTIST.values()))

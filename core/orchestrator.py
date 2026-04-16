@@ -136,26 +136,24 @@ class ArcadiumAPI:
         self.chatwoot_service: Optional[ChatwootService] = None
 
         from services.composio_calendar_service import ComposioCalendarService
+        from config.calendar_mapping import get_doctor_emails
 
-        # Instanciar servicios de calendario para ambos doctores (initialize() async se llama en _init_langgraph)
-        JORGE_EMAIL = "jorge.arias.amauta@gmail.com"
-        JAVIER_EMAIL = "javiarias000@gmail.com"
+        # Instanciar servicios de calendario dinámicamente desde config
         self._calendar_services: Dict[str, Any] = {}
 
         try:
-            jorge_svc = ComposioCalendarService(
-                calendar_id=JORGE_EMAIL,
-                timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
+            doctor_emails = get_doctor_emails()
+            for email in doctor_emails:
+                svc = ComposioCalendarService(
+                    calendar_id=email,
+                    timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
+                )
+                self._calendar_services[email] = svc
+            logger.info(
+                "ComposioCalendarService instanciado",
+                doctores=doctor_emails,
+                count=len(self._calendar_services),
             )
-            javier_svc = ComposioCalendarService(
-                calendar_id=JAVIER_EMAIL,
-                timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
-            )
-            self._calendar_services = {
-                JORGE_EMAIL: jorge_svc,
-                JAVIER_EMAIL: javier_svc,
-            }
-            logger.info("ComposioCalendarService instanciado para 2 doctores (pendiente initialize())")
         except Exception as e:
             logger.error("Error instanciando ComposioCalendarService", error=str(e))
 

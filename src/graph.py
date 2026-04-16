@@ -104,17 +104,26 @@ def build_graph(
         partial(
             node_cancel_appointment,
             calendar_service=calendar_service,
+            calendar_services=calendar_services,
             db_service=db_service,
         ),
     )
     # Forcing tool: verificación real en Calendar antes de operar sobre citas
     graph.add_node(
         "check_existing_appointment",
-        partial(node_check_existing_appointment, calendar_service=calendar_service),
+        partial(
+            node_check_existing_appointment,
+            calendar_service=calendar_service,
+            calendar_services=calendar_services,
+        ),
     )
     graph.add_node(
         "lookup_appointment",
-        partial(node_lookup_appointment, calendar_service=calendar_service),
+        partial(
+            node_lookup_appointment,
+            calendar_service=calendar_service,
+            calendar_services=calendar_services,
+        ),
     )
     graph.add_node("prepare_modification", node_prepare_modification)
     graph.add_node(

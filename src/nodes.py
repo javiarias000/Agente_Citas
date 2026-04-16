@@ -753,12 +753,14 @@ async def node_cancel_appointment(
     state: ArcadiumState,
     *,
     calendar_service=None,
+    calendar_services=None,
     db_service=None,
 ) -> Dict[str, Any]:
     """
     Cancela cita en Google Calendar y DB.
     DETERMINISTA — cero LLM.
     """
+    calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     event_id = state.get("google_event_id")
     appt_id = state.get("appointment_id")
 
@@ -881,6 +883,7 @@ async def node_check_existing_appointment(
     state: ArcadiumState,
     *,
     calendar_service=None,
+    calendar_services=None,
 ) -> Dict[str, Any]:
     """
     Forcing tool — SIEMPRE se ejecuta cuando el intent es agendar, cancelar o reagendar.
@@ -906,6 +909,7 @@ async def node_check_existing_appointment(
     DETERMINISTA — cero LLM.
     """
     # ── Guard: sin calendar_service ──────────────────────────────────────────
+    calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     if not calendar_service:
         logger.warning("node_check_existing_appointment: sin calendar_service")
         return _no_appointment_found()
@@ -1199,6 +1203,7 @@ async def node_lookup_appointment(
     state: ArcadiumState,
     *,
     calendar_service=None,
+    calendar_services=None,
 ) -> Dict[str, Any]:
     """
     Busca la cita real del cliente en Google Calendar.
@@ -1208,6 +1213,7 @@ async def node_lookup_appointment(
     Busca en los próximos 60 días eventos cuya descripción contenga el número de teléfono.
     Actualiza el estado con el evento encontrado (google_event_id, datetime_preference, etc.)
     """
+    calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     if not calendar_service:
         logger.warning("node_lookup_appointment: sin calendar_service, saltando")
         return {}
