@@ -179,6 +179,32 @@ class ComposioCalendarService:
             dt = dt.replace(tzinfo=self._local_tz)
         return dt.astimezone(ZoneInfo("UTC")).isoformat()
 
+    def _parse_slot_datetime(self, slot: Any) -> Optional[datetime]:
+        """Normaliza cualquier formato de slot a datetime con timezone local."""
+        if isinstance(slot, dict):
+            start = slot.get("start")
+        else:
+            start = slot
+
+        if isinstance(start, datetime):
+            return start if start.tzinfo else start.replace(tzinfo=self._local_tz)
+        try:
+            dt = datetime.fromisoformat(str(start))
+            return dt if dt.tzinfo else dt.replace(tzinfo=self._local_tz)
+        except (ValueError, TypeError):
+            return None
+
+    def _format_iso_time(self, dt: datetime) -> str:
+        """Formatea datetime a ISO string sin timezone para display."""
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt.isoformat()
+
+    def _duration_to_hm(self, duration: timedelta) -> tuple[int, int]:
+        """Convierte timedelta a (horas, minutos_restantes)."""
+        mins = int(duration.total_seconds() // 60)
+        return mins // 60, mins % 60
+
     # ─── Operaciones públicas ──────────────────────────────────────────────────
 
     async def create_event(
@@ -197,9 +223,7 @@ class ComposioCalendarService:
         """
         local_start = self._dt_to_local_naive(start_time)
         duration = end_time - start_time
-        duration_minutes = int(duration.total_seconds() // 60)
-        duration_hours = duration_minutes // 60
-        duration_mins_remainder = duration_minutes % 60
+        duration_hours, duration_mins_remainder = self._duration_to_hm(duration)
 
         args: Dict[str, Any] = {
             "start_datetime": local_start.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -321,9 +345,9 @@ class ComposioCalendarService:
             args["timezone"] = self.timezone
         if start_time is not None and end_time is not None:
             duration = end_time - start_time
-            mins = int(duration.total_seconds() // 60)
-            args["event_duration_hour"] = mins // 60
-            args["event_duration_minutes"] = mins % 60
+            hours, mins = self._duration_to_hm(duration)
+            args["event_duration_hour"] = hours
+            args["event_duration_minutes"] = mins
         if attendees is not None:
             args["attendees"] = attendees
 
@@ -331,22 +355,13 @@ class ComposioCalendarService:
         data = await self._execute_async("GOOGLECALENDAR_PATCH_CALENDAR", args)
         return data.get("response_data") or {}
 
-    async def get_available_slots(
+    async def _extract_busy_periods(
         self,
-        date: Any,
-        duration_minutes: int = 60,
-        start_hour: int = 9,
-        end_hour: int = 18,
-    ) -> List[Dict[str, Any]]:
-        """
-        Retorna slots libres del día usando FIND_FREE_SLOTS.
-        Calcula intervalos de `duration_minutes` dentro del horario laboral.
-        """
-        if isinstance(date, datetime):
-            date_only = date.date()
-        else:
-            date_only = date
-
+        date_only,
+        start_hour: int,
+        end_hour: int,
+    ) -> List[Dict[str, str]]:
+        """Extrae periodos ocupados. Fallback a list_events si FIND_FREE_SLOTS falla."""
         data = await self._execute_async(
             "GOOGLECALENDAR_FIND_FREE_SLOTS",
             {
@@ -356,15 +371,13 @@ class ComposioCalendarService:
             },
         )
 
-        # Log raw response para diagnóstico de mismatch de calendar_id
         calendars_raw = data.get("calendars") or {}
         logger.info(
-            "FIND_FREE_SLOTS raw calendar keys",
+            "FIND_FREE_SLOTS calendar keys",
             keys=list(calendars_raw.keys()),
             calendar_id=self.calendar_id,
         )
 
-        # Extraer períodos ocupados — buscar en todas las keys conocidas
         cal_data = (
             calendars_raw.get(self.calendar_id)
             or calendars_raw.get("primary")
@@ -374,8 +387,7 @@ class ComposioCalendarService:
 
         busy_periods = cal_data.get("busy", [])
 
-        # Fallback: si FIND_FREE_SLOTS devuelve 0 busy periods, verificar con list_events
-        # para detectar citas que el freebusy API podría estar omitiendo.
+        # Fallback: si FIND_FREE_SLOTS devuelve 0 busy, verificar con list_events
         if not busy_periods:
             try:
                 day_start_dt = datetime.combine(date_only, time(start_hour, 0), tzinfo=self._local_tz)
@@ -383,11 +395,10 @@ class ComposioCalendarService:
                 events = await self.list_events(day_start_dt, day_end_dt, max_results=50)
                 if events:
                     logger.info(
-                        "FIND_FREE_SLOTS devolvió 0 busy — usando list_events como fallback",
+                        "FIND_FREE_SLOTS fallback: using list_events",
                         events_found=len(events),
                     )
                     for ev in events:
-                        # Google API anida: {"start": {"dateTime": "..."}} o {"start": {"date": "..."}}
                         s = ev.get("start") or {}
                         e = ev.get("end") or {}
                         ev_start = s.get("dateTime") or s.get("date") or (s if isinstance(s, str) else "")
@@ -395,9 +406,19 @@ class ComposioCalendarService:
                         if ev_start and ev_end:
                             busy_periods.append({"start": ev_start, "end": ev_end})
             except Exception as e:
-                logger.warning("Fallback list_events falló", error=str(e))
+                logger.warning("Fallback list_events failed", error=str(e))
 
-        # Construir conjuntos de slots ocupados
+        return busy_periods
+
+    async def _generate_free_slots(
+        self,
+        date_only,
+        busy_periods: List[Dict[str, str]],
+        duration_minutes: int,
+        start_hour: int,
+        end_hour: int,
+    ) -> List[Dict[str, Any]]:
+        """Genera slots libres filtrando periodos ocupados."""
         busy_slots: set = set()
         for period in busy_periods:
             try:
@@ -412,7 +433,6 @@ class ComposioCalendarService:
             except (KeyError, ValueError):
                 continue
 
-        # Generar slots libres en horario laboral
         day_start = datetime.combine(date_only, time(start_hour, 0))
         day_end = datetime.combine(date_only, time(end_hour, 0))
         available_slots = []
@@ -429,6 +449,29 @@ class ComposioCalendarService:
                     }
                 )
             current += timedelta(minutes=duration_minutes)
+
+        return available_slots
+
+    async def get_available_slots(
+        self,
+        date: Any,
+        duration_minutes: int = 60,
+        start_hour: int = 9,
+        end_hour: int = 18,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna slots libres del día usando FIND_FREE_SLOTS.
+        Orquesta: obtén ocupados → genera libres → log.
+        """
+        if isinstance(date, datetime):
+            date_only = date.date()
+        else:
+            date_only = date
+
+        busy_periods = await self._extract_busy_periods(date_only, start_hour, end_hour)
+        available_slots = await self._generate_free_slots(
+            date_only, busy_periods, duration_minutes, start_hour, end_hour
+        )
 
         logger.info(
             "get_available_slots",

@@ -29,6 +29,31 @@ MAX_TOOL_ITERATIONS = 6
 MAX_HISTORY_MESSAGES = 10
 
 
+def _sanitize_message_history(messages: List) -> List:
+    """Remueve AIMessages con tool_calls huérfanos (sin ToolMessage responses)."""
+    sanitized = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            expected_ids = {tc["id"] for tc in msg.tool_calls}
+            j = i + 1
+            found_ids = set()
+            while j < len(messages) and isinstance(messages[j], ToolMessage):
+                found_ids.add(messages[j].tool_call_id)
+                j += 1
+            if expected_ids <= found_ids:
+                sanitized.extend(messages[i:j])
+                i = j
+            else:
+                logger.warning("node_react_loop: AIMessage con tool_calls huérfanos — descartado")
+                i = j
+        else:
+            sanitized.append(msg)
+            i += 1
+    return sanitized
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # NODO 1: ENTRY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -253,27 +278,7 @@ async def node_react_loop(
     if len(raw_history) > MAX_HISTORY:
         raw_history = raw_history[-MAX_HISTORY:]
 
-    sanitized = []
-    i = 0
-    while i < len(raw_history):
-        msg = raw_history[i]
-        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            expected_ids = {tc["id"] for tc in msg.tool_calls}
-            j = i + 1
-            found_ids = set()
-            while j < len(raw_history) and isinstance(raw_history[j], ToolMessage):
-                found_ids.add(raw_history[j].tool_call_id)
-                j += 1
-            if expected_ids <= found_ids:
-                sanitized.extend(raw_history[i:j])
-                i = j
-            else:
-                logger.warning("node_react_loop: AIMessage con tool_calls huérfanos — descartado")
-                i = j
-        else:
-            sanitized.append(msg)
-            i += 1
-
+    sanitized = _sanitize_message_history(raw_history)
     lm_messages = [SystemMessage(content=system_prompt)] + sanitized
 
     try:
@@ -361,6 +366,15 @@ async def node_execute_tools(
             state_updates = extract_state_updates(tool_name, result)
             combined_state_updates.update(state_updates)
 
+            # Flag de tipo de operación para formato de respuesta determinista
+            if getattr(result, "success", False):
+                if tool_name == "book_appointment":
+                    combined_state_updates["_operation_success_type"] = "book"
+                elif tool_name == "cancel_appointment":
+                    combined_state_updates["_operation_success_type"] = "cancel"
+                elif tool_name == "reschedule_appointment":
+                    combined_state_updates["_operation_success_type"] = "reschedule"
+
             logger.info(
                 "node_execute_tools: tool ejecutado",
                 tool=tool_name,
@@ -392,108 +406,57 @@ async def node_execute_tools(
 # NODO 4: FORMAT RESPONSE (determinista)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_booking_confirmation(service: str, slot_iso: str, patient_name: str) -> str:
-    """Template determinista para confirmación de cita agendada."""
-    try:
-        dt = datetime.fromisoformat(slot_iso)
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)  # Eliminar offset para display
-        dia = DIAS_ES[dt.weekday()]
-        fecha_str = dt.strftime("%d/%m")
-        hora_str = dt.strftime("%H:%M")
-    except Exception:
-        fecha_str = slot_iso
-        dia = ""
-        hora_str = ""
-
-    nombre = f", {patient_name}" if patient_name and patient_name.lower() != "paciente" else ""
-    return (
-        f"✅ Listo{nombre}. Su cita de {service} queda agendada para el "
-        f"{dia} {fecha_str} a las {hora_str}. ¡Le esperamos! 😊"
-    )
-
-
-def _build_cancel_confirmation() -> str:
-    return "Su cita ha sido cancelada exitosamente. ¿Hay algo más en lo que pueda ayudarle? 😊"
-
-
-def _build_reschedule_confirmation(service: str, slot_iso: str) -> str:
+def _format_slot_for_confirmation(slot_iso: str) -> str:
+    """Convierte slot ISO a display: 'lunes 14/04 a las 10:00'."""
     try:
         dt = datetime.fromisoformat(slot_iso)
         if dt.tzinfo is not None:
             dt = dt.replace(tzinfo=None)
         dia = DIAS_ES[dt.weekday()]
-        fecha_str = dt.strftime("%d/%m")
-        hora_str = dt.strftime("%H:%M")
+        return f"{dia} {dt.strftime('%d/%m a las %H:%M')}"
     except Exception:
-        fecha_str = slot_iso
-        dia = hora_str = ""
-    return (
-        f"✅ Su cita de {service} ha sido reagendada para el {dia} {fecha_str} "
-        f"a las {hora_str}. ¡Hasta pronto! 😊"
-    )
+        return slot_iso
+
+
+def _build_confirmation_response(
+    operation_type: str,
+    service: str = "",
+    slot_iso: str = "",
+    patient_name: str = "",
+) -> str:
+    """Template unificado para todas las confirmaciones de operación."""
+    if operation_type == "cancel":
+        return "Su cita ha sido cancelada exitosamente. ¿Hay algo más en lo que pueda ayudarle? 😊"
+    elif operation_type == "book":
+        slot_display = _format_slot_for_confirmation(slot_iso)
+        nombre = f", {patient_name}" if patient_name and patient_name.lower() != "paciente" else ""
+        return (
+            f"✅ Listo{nombre}. Su cita de {service} queda agendada para el "
+            f"{slot_display}. ¡Le esperamos! 😊"
+        )
+    elif operation_type == "reschedule":
+        slot_display = _format_slot_for_confirmation(slot_iso)
+        return (
+            f"✅ Su cita de {service} ha sido reagendada para el {slot_display}. "
+            f"¡Hasta pronto! 😊"
+        )
+    return "Operación completada. 😊"
 
 
 async def node_format_response(state: ArcadiumState) -> Dict[str, Any]:
     """
     Intercepción determinista para estados de éxito conocidos.
-    Si la operación fue exitosa → respuesta de template (sin LLM adicional).
-    Si no → pasar la respuesta del LLM tal cual.
-
-    Esto elimina el problema de que el LLM alucine sobre el resultado
-    de operaciones que ya fueron confirmadas por las tools.
+    Si _operation_success_type está set → usar template determinista.
+    Si no → pasar respuesta del LLM tal cual.
     """
-    messages = state.get("messages", [])
-    confirmation_sent = state.get("confirmation_sent", False)
-    google_event_id = state.get("google_event_id")
-    confirmation_type = state.get("confirmation_type")
+    op_type = state.get("_operation_success_type")
 
-    # Detectar si hubo una operación exitosa EN ESTE TURNO
-    # (buscando ToolMessage de éxito en los mensajes del turno actual)
-    book_success = False
-    cancel_success = False
-    reschedule_success = False
-
-    for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-        try:
-            data = json.loads(msg.content)
-            if data.get("success"):
-                # Identificar tipo por campos presentes
-                if "event_id" in data and "slot_iso" in data and data.get("event_link") is not None:
-                    book_success = True
-                elif "event_id" in data and "new_event_id" in data:
-                    reschedule_success = True
-                elif "event_id" in data and not data.get("slot_iso") and not data.get("new_event_id"):
-                    cancel_success = True
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-    if book_success and google_event_id:
+    if op_type:
         service = state.get("selected_service", "la consulta")
         slot = state.get("selected_slot") or state.get("datetime_preference", "")
         patient = state.get("patient_name", "")
-        text = _build_booking_confirmation(service, slot, patient)
-        logger.info("node_format_response: respuesta determinista (booking)")
-        return {
-            "messages": [AIMessage(content=text)],
-            "_final_response": text,
-        }
-
-    if cancel_success:
-        text = _build_cancel_confirmation()
-        logger.info("node_format_response: respuesta determinista (cancel)")
-        return {
-            "messages": [AIMessage(content=text)],
-            "_final_response": text,
-        }
-
-    if reschedule_success and google_event_id:
-        service = state.get("selected_service", "la consulta")
-        slot = state.get("selected_slot") or state.get("datetime_preference", "")
-        text = _build_reschedule_confirmation(service, slot)
-        logger.info("node_format_response: respuesta determinista (reschedule)")
+        text = _build_confirmation_response(op_type, service=service, slot_iso=slot, patient_name=patient)
+        logger.info("node_format_response: respuesta determinista", operation=op_type)
         return {
             "messages": [AIMessage(content=text)],
             "_final_response": text,
@@ -505,6 +468,7 @@ async def node_format_response(state: ArcadiumState) -> Dict[str, Any]:
         return {"_final_response": llm_text}
 
     # Fallback: buscar último AIMessage
+    messages = state.get("messages", [])
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and msg.content:
             return {"_final_response": msg.content}

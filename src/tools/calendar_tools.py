@@ -32,6 +32,7 @@ from src.schemas_v2 import (
     AppointmentInfo,
     RescheduleAppointmentResult,
 )
+from src.utils import adjust_to_next_business_day
 
 logger = structlog.get_logger("tools.calendar")
 
@@ -55,18 +56,26 @@ SERVICE_DURATIONS = {
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 
-def _format_slot_display(dt: datetime) -> str:
+def _format_slot_display(dt: datetime, service: str = "") -> str:
+    """Formato unificado: 'lunes 14/04 a las 10:00' o con servicio."""
     dia = DIAS_ES[dt.weekday()]
-    return f"{dia} {dt.strftime('%d/%m')} a las {dt.strftime('%H:%M')}"
+    time_str = dt.strftime('%d/%m a las %H:%M')
+    if service:
+        return f"{service} el {dia} {time_str}"
+    return f"{dia} {time_str}"
 
 
-def _adjust_weekend(dt: datetime) -> tuple[datetime, bool]:
-    """Si es sábado (5) o domingo (6), mover al siguiente lunes."""
-    if dt.weekday() == 5:
-        return dt + timedelta(days=2), True
-    if dt.weekday() == 6:
-        return dt + timedelta(days=1), True
-    return dt, False
+# Usar adjust_to_next_business_day de utils en lugar de _adjust_weekend
+_adjust_weekend = adjust_to_next_business_day
+
+
+def _slot_matches_time(slot: str, target_dt: datetime) -> bool:
+    """Compara slot ISO con datetime por hora exacta (no por string)."""
+    try:
+        slot_dt = datetime.fromisoformat(slot)
+        return slot_dt.hour == target_dt.hour and slot_dt.minute == target_dt.minute
+    except ValueError:
+        return False
 
 
 # ── Tool 1: check_availability ────────────────────────────────────────────────
@@ -239,15 +248,14 @@ def make_book_appointment_tool(calendar_service, db_service):
                 fresh_slots = await calendar_service.get_available_slots(
                     date=dt, duration_minutes=duration
                 )
-                time_key = f"T{dt.hour:02d}:{dt.minute:02d}"
-                if fresh_slots and not any(time_key in s for s in fresh_slots):
+                if fresh_slots and not any(_slot_matches_time(s, dt) for s in fresh_slots):
                     logger.warning(
                         "book_appointment: slot ya no disponible",
                         slot=slot_iso,
                         fresh_slots=fresh_slots[:4],
                     )
                     alternatives = ", ".join(
-                        s[11:16] for s in fresh_slots[:3]
+                        datetime.fromisoformat(s).strftime("%H:%M") for s in fresh_slots[:3]
                     ) if fresh_slots else "ninguno"
                     return BookAppointmentResult(
                         success=False,

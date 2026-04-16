@@ -13,6 +13,8 @@ from typing import Dict, Any, List, Optional
 
 from zoneinfo import ZoneInfo
 
+from src.utils import adjust_to_next_business_day
+
 logger = structlog.get_logger("langgraph.calendar")
 TIMEZONE = ZoneInfo("America/Guayaquil")
 BUSINESS_START = 9
@@ -32,6 +34,15 @@ class GoogleCalendarService:
         self._svc = calendar_service
         self._db = db_service
 
+    def _slot_to_iso(self, slot: any) -> str:
+        """Extrae y convierte un slot a ISO string."""
+        start = slot.get("start", slot) if isinstance(slot, dict) else slot
+        if isinstance(start, datetime):
+            return start.isoformat()
+        elif isinstance(start, str):
+            return start
+        return ""
+
     async def get_available_slots(
         self,
         date: datetime,
@@ -46,13 +57,7 @@ class GoogleCalendarService:
                 end_hour=BUSINESS_END,
             )
             # Convertir a lista de ISO strings
-            iso_slots = []
-            for slot in slots:
-                start = slot.get("start", slot) if isinstance(slot, dict) else slot
-                if isinstance(start, datetime):
-                    iso_slots.append(start.isoformat())
-                elif isinstance(start, str):
-                    iso_slots.append(start)
+            iso_slots = [self._slot_to_iso(s) for s in slots if self._slot_to_iso(s)]
             print(f"[calendar] slots raw={len(slots)} iso={len(iso_slots)} date={date.date()}")
             logger.info("Slots disponibles", date=date.date().isoformat(), count=len(iso_slots))
             return iso_slots
@@ -141,9 +146,5 @@ class GoogleCalendarService:
         return event
 
 
-def weekend_adjust(dt: datetime) -> tuple[datetime, bool]:
-    """Si cae en fin de semana, avanza al lunes. Retorna (fecha, ajustado)."""
-    if dt.weekday() >= 5:
-        days = 7 - dt.weekday()  # sábado→2, domingo→1
-        return dt + timedelta(days=days), True
-    return dt, False
+# Usar adjust_to_next_business_day de utils en lugar de weekend_adjust
+weekend_adjust = adjust_to_next_business_day
