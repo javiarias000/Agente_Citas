@@ -168,9 +168,13 @@ class Settings(BaseSettings):
     )
 
     # Seguridad
-    WEBHOOK_SECRET: Optional[str] = Field(
+    API_KEY: Optional[str] = Field(
         default=None,
-        description="Secreto para verificar webhooks (opcional)"
+        description="API key para proteger endpoints sensibles (opcional para desarrollo)"
+    )
+    WEBHOOK_SECRET: str = Field(
+        default="",
+        description="Secreto para verificar webhooks (requerido para producción)"
     )
     CORS_ORIGINS: List[str] = Field(
         default=["*"],
@@ -274,6 +278,15 @@ class Settings(BaseSettings):
         """Valida que la API key de OpenAI esté presente si se usa LLM"""
         if not v:
             raise ValueError('OPENAI_API_KEY es requerido')
+        return v
+
+    @field_validator('WEBHOOK_SECRET')
+    @classmethod
+    def validate_webhook_secret(cls, v: str, info) -> str:
+        """En producción (DEBUG=False), WEBHOOK_SECRET debe estar configurado"""
+        debug = info.data.get('DEBUG', False)
+        if not debug and not v:
+            raise ValueError('WEBHOOK_SECRET es requerido en producción')
         return v
 
     @field_validator('CORS_ORIGINS', mode='before')

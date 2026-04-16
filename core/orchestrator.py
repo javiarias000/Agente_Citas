@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional
 
 import structlog
 from fastapi import (
+    Depends,
     FastAPI,
     Header,
     HTTPException,
@@ -45,7 +46,10 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from core.auth import verify_api_token, verify_api_token_optional
 from core.config import get_settings
+from core.resilience import with_timeout
+from core.startup import run_startup_checks
 from db.models import Base, Conversation, Message, Project, ProjectAgentConfig
 from memory.memory_manager import MemoryManager
 from services.chatwoot_service import ChatwootError, ChatwootMessage, ChatwootService
@@ -418,6 +422,8 @@ class ArcadiumAPI:
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             try:
+                # Run startup checks before initializing
+                run_startup_checks()
                 await self.initialize()
                 app.state.api = self
                 logger.info("✅ Servidor iniciado correctamente")
@@ -617,7 +623,10 @@ class ArcadiumAPI:
             }
 
         @app.get("/api/history/{session_id}")
-        async def get_history(session_id: str):
+        async def get_history(
+            session_id: str,
+            _: str = Depends(verify_api_token_optional)
+        ):
             try:
                 history = await self.memory_manager.get_history(session_id)
                 return {
@@ -632,7 +641,7 @@ class ArcadiumAPI:
                 raise HTTPException(status_code=500, detail=str(e))
 
         @app.get("/api/calendar/status")
-        async def calendar_status():
+        async def calendar_status(_: str = Depends(verify_api_token_optional)):
             try:
                 from services.google_calendar_service import get_default_calendar_service
                 import os
@@ -654,7 +663,7 @@ class ArcadiumAPI:
         # ── Admin / Client pages ──────────────────────
 
         @app.get("/admin")
-        async def admin_dashboard():
+        async def admin_dashboard(_: str = Depends(verify_api_token_optional)):
             from fastapi.responses import FileResponse
 
             path = os.path.join(
@@ -667,7 +676,7 @@ class ArcadiumAPI:
             )
 
         @app.get("/admin/agent-config")
-        async def admin_agent_config():
+        async def admin_agent_config(_: str = Depends(verify_api_token_optional)):
             from fastapi.responses import FileResponse
 
             path = os.path.join(
@@ -821,6 +830,7 @@ class ArcadiumAPI:
     # Webhook: WhatsApp
     # ============================================
 
+    @with_timeout(30.0)  # WhatsApp webhooks timeout after 30s
     async def _handle_whatsapp_webhook(self, request: Request) -> Dict[str, Any]:
         """Webhook principal de WhatsApp."""
         async with self.db.get_session() as session:
@@ -923,6 +933,7 @@ class ArcadiumAPI:
     # Webhook: Chatwoot
     # ============================================
 
+    @with_timeout(30.0)  # Chatwoot webhooks timeout after 30s
     async def _handle_chatwoot_webhook(self, request: Request) -> Dict[str, Any]:
         """Webhook de Chatwoot."""
         async with self.db.get_session() as session:

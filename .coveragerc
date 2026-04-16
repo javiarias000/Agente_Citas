@@ -1,0 +1,52 @@
+[run]
+source =
+    core
+    db
+    services
+    utils
+    src
+    memory_agent_integration
+    admin
+
+omit =
+    */venv/*
+    */site-packages/*
+    */tests/*
+    setup.py
+    */__pycache__/*
+    */migrations/*
+
+branch = True
+parallel = True
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @abc.abstractmethod
+    except ImportError:
+    except ModuleNotFoundError:
+    logger\.
+    pass
+
+precision = 2
+show_missing = True
+skip_covered = False
+
+[paths]
+source =
+    .
+    */site-packages/
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml
+
+fail_under = 60

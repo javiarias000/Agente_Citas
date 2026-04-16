@@ -1,0 +1,179 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arcadium-automation"
+version = "1.0.0"
+description = "Medical appointment booking automation system with WhatsApp & Google Calendar integration"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    {name = "Javier Arias", email = "javiarias000@gmail.com"}
+]
+keywords = ["whatsapp", "booking", "calendar", "automation", "fastapi", "langgraph"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+]
+
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "sqlalchemy>=2.0.0",
+    "psycopg[binary]>=3.1.0",
+    "alembic>=1.12.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.0.11",
+    "langchain-community>=0.0.1",
+    "langgraph>=0.0.65",
+    "openai>=1.3.0",
+    "httpx>=0.25.0",
+    "google-auth>=2.28.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-api-python-client>=2.108.0",
+    "python-dotenv>=1.0.0",
+    "structlog>=23.3.0",
+    "tenacity>=8.2.0",
+    "prometheus-client>=0.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.7.0",
+    "black>=23.12.0",
+    "ruff>=0.1.8",
+    "pre-commit>=3.5.0",
+]
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "coverage[toml]>=7.3.0",
+]
+production = [
+    "gunicorn>=21.2.0",
+    "uvicorn[standard]>=0.27.0",
+]
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+select = ["E", "F", "W", "I", "N", "UP", "B", "S"]
+ignore = ["E501", "B008"]
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "migrations",
+]
+
+[tool.ruff.isort]
+known-first-party = ["core", "db", "services", "utils", "src", "admin", "memory_agent_integration"]
+known-third-party = ["fastapi", "sqlalchemy", "langchain", "pydantic"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
+addopts = "--strict-markers --tb=short"
+markers = [
+    "asyncio: async tests",
+    "integration: integration tests",
+    "unit: unit tests",
+    "slow: slow running tests",
+    "db: database required",
+    "external: external services required",
+]
+
+[tool.coverage.run]
+source = ["core", "db", "services", "utils", "src", "admin", "memory_agent_integration"]
+omit = [
+    "*/venv/*",
+    "*/site-packages/*",
+    "*/tests/*",
+    "setup.py",
+    "*/__pycache__/*",
+    "*/migrations/*",
+]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:.*",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+    "@abc.abstractmethod",
+    "except ImportError:",
+    "except ModuleNotFoundError:",
+    "logger\\.",
+    "pass",
+]
+precision = 2
+show_missing = true
+skip_covered = false
+fail_under = 60
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+implicit_optional = false
+implicit_reexport = false
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "langchain.*",
+    "langchain_community.*",
+    "langchain_openai.*",
+    "google.auth.*",
+    "googleapiclient.*",
+    "tenacity.*",
+    "prometheus_client.*",
+    "structlog.*",
+]
+ignore_missing_imports = true
