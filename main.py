@@ -14,6 +14,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.orchestrator import ArcadiumAPI, get_settings
 
 
+def create_app():
+    """Factory function para Uvicorn"""
+    settings = get_settings()
+    api = ArcadiumAPI(settings)
+    return api.create_app()
+
+
 async def run_orchestrator():
     """Punto de entrada asincrónico"""
     settings = get_settings()
