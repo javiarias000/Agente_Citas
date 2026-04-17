@@ -113,14 +113,19 @@ class GoogleCalendarService:
         Returns:
             (event_id, html_link)
         """
-        event = await self._svc.create_event(
+        result = await self._svc.create_event(
             title=title,
             start_time=start,
             end_time=end,
             description=description,
         )
-        event_id = event.get("id", "")
-        html_link = event.get("htmlLink", "")
+        # GoogleCalendarService retorna tuple, no dict
+        if isinstance(result, tuple):
+            event_id, html_link = result
+        else:
+            # Fallback para servicios que retornan dict
+            event_id = result.get("id", "")
+            html_link = result.get("htmlLink", "")
         logger.info("Evento creado", event_id=event_id, link=html_link)
         return event_id, html_link
 

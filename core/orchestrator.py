@@ -297,14 +297,13 @@ class ArcadiumAPI:
             self.checkpointer_ctx = PostgresSaver.from_conn_string(pg_url, serde=_serde)
             self.checkpointer = await self.checkpointer_ctx.__aenter__()
 
-            # Inicializar AMBOS ComposioCalendarService (async — carga tools MCP)
+            # Usar GoogleCalendarService directamente (API directo, sin MCP)
             wrapped_calendars: Dict[str, Any] = {}
             for email, svc in self._calendar_services.items():
                 try:
-                    await svc.initialize()
-                    from src.calendar_service import GoogleCalendarService as CalendarAdapter
-                    wrapped_calendars[email] = CalendarAdapter(calendar_service=svc, db_service=None)
-                    logger.info("CalendarAdapter inicializado", doctor=email)
+                    # GoogleCalendarService está listo inmediatamente (no necesita initialize)
+                    wrapped_calendars[email] = svc
+                    logger.info("GoogleCalendarService inicializado (API directa)", doctor=email)
                 except Exception as e:
                     logger.error("Error inicializando calendar para doctor", doctor=email, error=str(e))
 
