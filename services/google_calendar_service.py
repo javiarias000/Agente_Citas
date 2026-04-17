@@ -176,18 +176,24 @@ class GoogleCalendarService:
     async def create_event(
         self,
         title: str,
-        start_time: datetime,
-        end_time: datetime,
+        start: datetime = None,
+        end: datetime = None,
         description: str = "",
         attendees: Optional[List[str]] = None,
         location: str = "",
         reminder_minutes: int = 30,
-    ) -> Dict[str, Any]:
-        """Crea un evento en Google Calendar."""
+        # Legacy param names (compatibility)
+        start_time: datetime = None,
+        end_time: datetime = None,
+    ) -> tuple[str, str]:
+        """Crea evento en Google Calendar. Retorna (event_id, html_link)."""
+        # Soportar ambos nombres de parámetros
+        start_dt = start or start_time
+        end_dt = end or end_time
 
         def _sync():
-            start_utc = self.to_utc(start_time)
-            end_utc = self.to_utc(end_time)
+            start_utc = self.to_utc(start_dt)
+            end_utc = self.to_utc(end_dt)
             event = {
                 "summary": title,
                 "description": description,
@@ -218,13 +224,16 @@ class GoogleCalendarService:
                 )
                 .execute()
             )
+            event_id = created.get("id", "")
+            html_link = created.get("htmlLink", "")
+
             logger.info(
                 "Evento creado",
-                event_id=created["id"],
+                event_id=event_id,
                 title=title,
                 start=start_utc.isoformat(),
             )
-            return created
+            return (event_id, html_link)
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync)

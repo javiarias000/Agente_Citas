@@ -139,7 +139,7 @@ class ArcadiumAPI:
         self.whatsapp_service: Optional[WhatsAppService] = None
         self.chatwoot_service: Optional[ChatwootService] = None
 
-        from services.composio_calendar_service import ComposioCalendarService
+        from services.google_calendar_service import GoogleCalendarService
         from config.calendar_mapping import get_doctor_emails
 
         # Instanciar servicios de calendario dinámicamente desde config
@@ -148,18 +148,18 @@ class ArcadiumAPI:
         try:
             doctor_emails = get_doctor_emails()
             for email in doctor_emails:
-                svc = ComposioCalendarService(
+                svc = GoogleCalendarService(
                     calendar_id=email,
                     timezone=self.settings.GOOGLE_CALENDAR_TIMEZONE,
                 )
                 self._calendar_services[email] = svc
             logger.info(
-                "ComposioCalendarService instanciado",
+                "GoogleCalendarService instanciado (API directa)",
                 doctores=doctor_emails,
                 count=len(self._calendar_services),
             )
         except Exception as e:
-            logger.error("Error instanciando ComposioCalendarService", error=str(e))
+            logger.error("Error instanciando GoogleCalendarService", error=str(e))
 
         # FIX: OrderedDict para implementar LRU simple en el cache de agentes
         self._agents: OrderedDict[str, Any] = OrderedDict()
