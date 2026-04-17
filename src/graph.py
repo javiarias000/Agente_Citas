@@ -60,6 +60,7 @@ def build_graph(
         node_extract_data,
         node_extract_intent,
         node_generate_response_with_tools,
+        node_get_appointment_history,
         node_lookup_appointment,
         node_match_closest_slot,
         node_prepare_modification,
@@ -125,6 +126,14 @@ def build_graph(
             calendar_services=calendar_services,
         ),
     )
+    graph.add_node(
+        "get_appointment_history",
+        partial(
+            node_get_appointment_history,
+            calendar_service=calendar_service,
+            calendar_services=calendar_services,
+        ),
+    )
     graph.add_node("prepare_modification", node_prepare_modification)
     graph.add_node(
         "reschedule_appointment",
@@ -166,6 +175,8 @@ def build_graph(
             # agendar/cancelar/reagendar pasan por el forcing tool
             "check_existing_appointment": "check_existing_appointment",
             "check_availability": "check_availability",
+            # historial: obtener citas del usuario
+            "get_appointment_history": "get_appointment_history",
             # Ruta directa a detect_confirmation cuando awaiting_confirmation=True
             "detect_confirmation": "detect_confirmation",
             "generate_response": "generate_response",
@@ -245,6 +256,9 @@ def build_graph(
             "check_missing": "check_missing",
         },
     )
+
+    # get_appointment_history → generate_response (mostrar historial al usuario)
+    graph.add_edge("get_appointment_history", "generate_response")
 
     # check_availability → match_closest_slot
     graph.add_edge("check_availability", "match_closest_slot")

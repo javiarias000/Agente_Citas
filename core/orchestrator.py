@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import structlog
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import (
     Depends,
     FastAPI,
@@ -138,6 +139,7 @@ class ArcadiumAPI:
         self.memory_manager: Optional[MemoryManager] = None
         self.whatsapp_service: Optional[WhatsAppService] = None
         self.chatwoot_service: Optional[ChatwootService] = None
+        self._scheduler: Optional[AsyncIOScheduler] = None
 
         from services.google_calendar_service import GoogleCalendarService
         from config.calendar_mapping import get_doctor_emails
@@ -223,6 +225,8 @@ class ArcadiumAPI:
         if self.settings.USE_LANGGRAPH:
             await self._init_langgraph()
 
+        await self._init_scheduler()
+
         logger.info("ArcadiumAPI inicializada")
 
     def _setup_metrics(self):
@@ -243,6 +247,29 @@ class ArcadiumAPI:
                 )
             else:
                 raise
+
+    async def _init_scheduler(self):
+        """Inicializa APScheduler con trabajos automáticos."""
+        try:
+            from services.reminder_service import send_appointment_reminders
+
+            self._scheduler = AsyncIOScheduler(timezone="America/Guayaquil")
+
+            # Job: Enviar recordatorios cada 15 minutos
+            self._scheduler.add_job(
+                send_appointment_reminders,
+                "interval",
+                minutes=15,
+                args=[self.settings.DATABASE_URL, self.whatsapp_service],
+                id="send_appointment_reminders",
+                name="Enviar recordatorios 24h antes de cita",
+                replace_existing=True,
+            )
+
+            self._scheduler.start()
+            logger.info("Scheduler inicializado con recordatorios cada 15 minutos")
+        except Exception as e:
+            logger.warning("Error inicializando scheduler", error=str(e))
 
     async def _init_langgraph(self) -> None:
         try:
@@ -1419,6 +1446,9 @@ class ArcadiumAPI:
 
     async def shutdown(self):
         logger.info("Cerrando ArcadiumAPI")
+        if self._scheduler and self._scheduler.running:
+            self._scheduler.shutdown(wait=False)
+            logger.info("Scheduler detenido")
         for agent in self._agents.values():
             if hasattr(agent, "memory_manager"):
                 try:

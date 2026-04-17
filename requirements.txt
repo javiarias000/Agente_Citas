@@ -67,4 +67,5 @@ google-auth>=2.0.0
 composio-langchain>=0.7.0
 langchain-mcp-adapters>=0.1.0
 
-
+# Task scheduling
+apscheduler>=3.10.0

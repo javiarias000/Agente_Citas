@@ -281,10 +281,16 @@ async def node_entry(
             profile = await store.get_user_profile(phone)
             if profile and profile.get("patient_name"):
                 updates["patient_name"] = profile["patient_name"]
+                # Calcular is_new_patient basado en total_conversations
+                total_convs = profile.get("total_conversations", 0)
+                updates["is_new_patient"] = (total_convs == 0)
+                # Cargar preferencias del paciente
+                updates["patient_preferences"] = profile.get("preferences", {})
                 logger.info(
-                    "node_entry: patient_name desde user_profile",
+                    "node_entry: perfil de usuario cargado",
                     phone=phone,
                     patient_name=profile["patient_name"],
+                    is_new=updates["is_new_patient"],
                 )
         except Exception:
             pass
@@ -2446,6 +2452,66 @@ async def node_generate_response_with_tools(
 # ═══════════════════════════════════════════════════════════
 # NODO EJECUCIÓN DE MEMORY TOOLS
 # ═══════════════════════════════════════════════════════════
+
+async def node_get_appointment_history(
+    state: ArcadiumState,
+    *,
+    calendar_service=None,
+    calendar_services=None,
+) -> Dict[str, Any]:
+    """
+    Obtiene historial de citas del usuario (próximos 30 días).
+    DETERMINISTA — cero LLM.
+
+    Busca en Google Calendar eventos del usuario y retorna lista de citas.
+    """
+    calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
+    if not calendar_service:
+        logger.warning("node_get_appointment_history: sin calendar_service, saltando")
+        return {"existing_appointments": [], "calendar_lookup_done": True}
+
+    phone = state.get("phone_number", "")
+    if not phone:
+        logger.warning("node_get_appointment_history: sin phone_number")
+        return {"existing_appointments": [], "calendar_lookup_done": True}
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("America/Guayaquil")
+        now = datetime.now(tz)
+        future = now + timedelta(days=30)
+
+        events = await calendar_service.search_events_by_query(
+            q=phone,
+            start_date=now,
+            end_date=future,
+        )
+
+        matching = []
+        for event in events:
+            desc = event.get("description", "") or ""
+            if phone in desc or phone.lstrip("+") in desc:
+                matching.append(event)
+
+        logger.info(
+            "node_get_appointment_history: citas encontradas",
+            phone=phone,
+            count=len(matching),
+        )
+
+        return {
+            "existing_appointments": matching[:10],
+            "calendar_lookup_done": True,
+        }
+
+    except Exception as e:
+        logger.error("node_get_appointment_history: error consultando Calendar", error=str(e))
+        return {
+            "existing_appointments": [],
+            "calendar_lookup_done": True,
+        }
+
 
 async def node_execute_memory_tools(
     state: ArcadiumState,

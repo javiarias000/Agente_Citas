@@ -260,6 +260,11 @@ class Appointment(Base):
         nullable=False,
         comment="Estado de sincronización: synced, pending, error"
     )
+    reminder_sent_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp de cuándo se envió el recordatorio"
+    )
 
     # Relaciones
     project: Mapped["Project"] = relationship(back_populates="appointments")

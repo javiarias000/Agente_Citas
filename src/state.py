@@ -105,10 +105,16 @@ INTENT_KEYWORDS: Dict[str, List[str]] = {
         "horario",
         "cuando puedo",
         "cuándo puedo",
-        "mis citas",
         "proxima cita",
         "próxima cita",
+    ],
+    "historial": [
+        "historial",
+        "mis citas",
         "ver mis citas",
+        "citas anteriores",
+        "citas pasadas",
+        "mis agendamientos",
     ],
 }
 
@@ -172,6 +178,9 @@ TRANSIENT_FIELDS: Set[str] = {
     "existing_appointments",  # lista de citas encontradas (se recalcula cada turno)
     "rebook_after_cancel",  # flag transitorio para flujo cancel+rebook
     "_slots_checked",  # True solo si node_check_availability corrió este turno
+    "is_new_patient",  # se calcula en node_entry
+    "patient_preferences",  # se carga en node_entry desde UserProfile
+    "patient_email",  # se puede solicitar pero no persiste
 }
 
 
@@ -211,6 +220,9 @@ class ArcadiumState(TypedDict, total=False):
     # --- Paciente ---
     patient_name: Optional[str]
     patient_phone: Optional[str]
+    patient_email: Optional[str]
+    is_new_patient: Optional[bool]
+    patient_preferences: Optional[Dict[str, Any]]
 
     # --- Cita ---
     selected_service: Optional[str]
@@ -308,6 +320,9 @@ def create_initial_arcadium_state(
         # Paciente
         patient_name=None,
         patient_phone=None,
+        patient_email=None,
+        is_new_patient=None,
+        patient_preferences=None,
         # Cita
         selected_service=None,
         service_duration=None,

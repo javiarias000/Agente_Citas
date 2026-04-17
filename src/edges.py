@@ -87,6 +87,9 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
     if intent == "consultar":
         return "check_availability"
 
+    if intent == "historial":
+        return "get_appointment_history"
+
     return "generate_response"
 
 
