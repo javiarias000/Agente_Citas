@@ -536,6 +536,20 @@ async def node_check_availability(
                 "last_error": "Sin disponibilidad en próximos días. Por favor intente otra fecha o llame a la clínica.",
             }
 
+        # Ordenar slots por preferencia de hora del paciente (Step 5)
+        prefs = state.get("patient_preferences", {})
+        if prefs.get("preferred_hour"):
+            try:
+                preferred_hour = int(prefs["preferred_hour"])
+                slots_iso.sort(
+                    key=lambda s: abs(
+                        datetime.fromisoformat(s).hour - preferred_hour
+                    )
+                    if s else 1000
+                )
+            except Exception:
+                pass  # Si hay error, mantener orden original
+
         logger.info(
             "node_check_availability: slots filtrados",
             date=dt.date().isoformat(),
@@ -807,6 +821,24 @@ async def node_book_appointment(
             except Exception as e:
                 logger.warning("[node_book_appointment] error creando cita en DB (no crítico)", error=str(e))
 
+        # Step 5: Guardar preferencias de paciente (hora preferida)
+        try:
+            booked_dt = datetime.fromisoformat(slot)
+            pref_update = {
+                "preferred_hour": booked_dt.hour,
+                "preferred_day_of_week": booked_dt.weekday(),
+                "preferred_doctor": state.get("doctor_email", "unknown"),
+            }
+            phone = state.get("phone_number")
+            if phone and store and hasattr(store, "upsert_user_profile"):
+                await store.upsert_user_profile(
+                    phone,
+                    {"preferences": pref_update}
+                )
+                logger.info("Preferencias guardadas", phone=phone, prefs=pref_update)
+        except Exception as e:
+            logger.warning("Error guardando preferencias (no crítico)", error=str(e))
+
         return {
             # Usar event_id como fallback para appointment_id si no hay DB
             "appointment_id": appt_id or f"gcal_{event_id}",
@@ -849,11 +881,13 @@ async def node_cancel_appointment(
 ) -> Dict[str, Any]:
     """
     Cancela cita en Google Calendar y DB.
+    Step 6: Si cancela, ofrece slots alternativos para reagendar.
     DETERMINISTA — cero LLM.
     """
     calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     event_id = state.get("google_event_id")
     appt_id = state.get("appointment_id")
+    duration = state.get("service_duration", 60)
 
     try:
         if calendar_service and event_id:
@@ -870,13 +904,50 @@ async def node_cancel_appointment(
             except Exception as e:
                 logger.warning("Error cancelando en DB", error=str(e))
 
+        # Step 6: Buscar slots alternativos en próximos 3 días
+        alternative_slots = []
+        try:
+            now_ec = datetime.now(TIMEZONE)
+            for day_offset in [1, 2, 3]:
+                next_day = now_ec + timedelta(days=day_offset)
+                # Saltar fines de semana
+                if next_day.weekday() >= 5:
+                    continue
+
+                next_day_midnight = next_day.replace(hour=0, minute=0, second=0, microsecond=0)
+                slots = await calendar_service.get_available_slots(
+                    date=next_day_midnight,
+                    duration_minutes=duration,
+                )
+
+                if slots:
+                    # Tomar primer slot disponible del día
+                    s = slots[0]
+                    slot_iso = None
+                    if isinstance(s, dict):
+                        start = s.get("start")
+                        slot_iso = start.isoformat() if isinstance(start, datetime) else str(start)
+                    else:
+                        slot_iso = str(s)
+
+                    if slot_iso:
+                        alternative_slots.append(slot_iso)
+
+                if len(alternative_slots) >= 3:
+                    break
+
+        except Exception as e:
+            logger.warning("Error buscando slots alternativos (no crítico)", error=str(e))
+
         return {
             "current_step": "resolution",
             "confirmation_sent": True,
-            # Limpiar estado de flujo para no atrapar la sesión siguiente en
-            # awaiting_confirmation=True (lo que causa que todo mensaje vaya a detect_confirmation)
-            "awaiting_confirmation": False,
-            "confirmation_type": None,
+            # Limpiar estado de flujo
+            "confirmation_type": "cancel_and_rebook" if alternative_slots else None,
+            "awaiting_confirmation": bool(alternative_slots),
+            "rebook_after_cancel": bool(alternative_slots),
+            # Retornar slots alternativos
+            "available_slots": alternative_slots,
             # Limpiar IDs para que el LLM no confunda con una reserva activa
             "appointment_id": None,
             "google_event_id": None,

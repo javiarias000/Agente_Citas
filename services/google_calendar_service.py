@@ -397,6 +397,86 @@ class GoogleCalendarService:
 
         return True
 
+    async def watch_calendar(self, webhook_url: str, channel_id: str) -> Dict[str, Any]:
+        """
+        Step 7: Habilita notificaciones push para cambios en el calendario.
+
+        Args:
+            webhook_url: URL donde Google enviará notificaciones (ej: https://example.com/webhook/google-calendar)
+            channel_id: ID único del canal (ej: uuid del Proyecto)
+
+        Returns:
+            Dict con resource_id para renovaciones futuras
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                self._watch_calendar_sync,
+                webhook_url,
+                channel_id,
+            )
+            return result
+        except Exception as e:
+            logger.error("Error en watch_calendar", error=str(e))
+            return {}
+
+    def _watch_calendar_sync(self, webhook_url: str, channel_id: str) -> Dict[str, Any]:
+        """Wrapper síncrono para watch_calendar."""
+        try:
+            service = self.service
+            body = {
+                "id": channel_id,
+                "type": "webhook",
+                "address": webhook_url,
+            }
+            result = service.calendars().watch(
+                calendarId=self.calendar_id,
+                body=body,
+            ).execute()
+            logger.info(
+                "Webhook registrado en Google Calendar",
+                channel_id=channel_id,
+                resource_id=result.get("resourceId"),
+            )
+            return result
+        except Exception as e:
+            logger.error("Error registrando webhook", error=str(e))
+            return {}
+
+    async def stop_watching_calendar(self, channel_id: str, resource_id: str) -> None:
+        """
+        Step 7: Detiene notificaciones push para un canal.
+
+        Args:
+            channel_id: ID del canal
+            resource_id: Resource ID retornado por watch_calendar
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                self._stop_watching_sync,
+                channel_id,
+                resource_id,
+            )
+        except Exception as e:
+            logger.error("Error deteniendo webhook", error=str(e))
+
+    def _stop_watching_sync(self, channel_id: str, resource_id: str) -> None:
+        """Wrapper síncrono para stop_watching_calendar."""
+        try:
+            service = self.service
+            service.channels().stop(
+                body={
+                    "id": channel_id,
+                    "resourceId": resource_id,
+                }
+            ).execute()
+            logger.info("Webhook detenido", channel_id=channel_id)
+        except Exception as e:
+            logger.error("Error ejecutando stop", error=str(e))
+
 
 # ─── Factories ────────────────────────────────────────────────────────────────
 

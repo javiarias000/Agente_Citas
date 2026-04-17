@@ -820,6 +820,7 @@ class ArcadiumAPI:
 
         app.post("/webhook/whatsapp")(self._handle_whatsapp_webhook)
         app.post("/webhook/chatwoot")(self._handle_chatwoot_webhook)
+        app.post("/webhook/google-calendar")(self._handle_calendar_webhook)
         app.post("/webhook/test")(self._handle_test_webhook)
         app.get("/health")(self._health_check)
         app.get("/metrics")(self._get_metrics)
@@ -1122,6 +1123,44 @@ class ArcadiumAPI:
     # ============================================
     # Webhook: Test
     # ============================================
+
+    async def _handle_calendar_webhook(self, request: Request) -> Dict[str, Any]:
+        """
+        Step 7: Maneja notificaciones push de Google Calendar.
+        Retorna 200 inmediatamente para sync, procesa cambios async.
+        """
+        try:
+            headers = dict(request.headers)
+            resource_state = headers.get("x-goog-resource-state", "unknown")
+
+            # sync = sincronización inicial, responder 200 inmediato
+            if resource_state == "sync":
+                logger.info("Google Calendar sync notification")
+                return {"status": "ok"}
+
+            # Parsear payload
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+
+            # Procesar async (no bloquear respuesta)
+            from services.calendar_sync_service import handle_calendar_push_notification
+
+            asyncio.create_task(
+                handle_calendar_push_notification(
+                    payload,
+                    headers,
+                    self._calendar_services,
+                    self.whatsapp_service,
+                )
+            )
+
+            return {"status": "processing"}
+
+        except Exception as e:
+            logger.error("Error en calendar webhook", error=str(e))
+            return {"status": "error"}
 
     async def _handle_test_webhook(self, request: Request) -> Dict[str, Any]:
         """Endpoint de prueba — no envía a WhatsApp ni Chatwoot."""

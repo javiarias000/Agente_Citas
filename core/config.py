@@ -252,6 +252,14 @@ class Settings(BaseSettings):
         default=None,
         description="Endpoint del MCP server para Google Calendar"
     )
+    PUBLIC_BASE_URL: Optional[str] = Field(
+        default=None,
+        description="URL pública para webhooks de Google Calendar (ej: https://example.com)"
+    )
+    CALENDAR_WEBHOOK_ENABLED: bool = Field(
+        default=False,
+        description="Habilitar sincronización bidireccional Google Calendar via webhooks"
+    )
 
     # Supabase (para vectorstore)
     SUPABASE_URL: Optional[str] = Field(
