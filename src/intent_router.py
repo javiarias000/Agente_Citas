@@ -34,6 +34,8 @@ INTENT_KEYWORDS: Dict[str, List[str]] = {
         "reagendar", "reagenda", "cambiar cita", "cambiar fecha",
         "cambiar la fecha", "reprogramar", "otra fecha", "otro dia",
         "otro día", "otro horario", "cambiar de fecha", "mover cita",
+        "cambiar para", "cambie para", "cambiar a las", "cambie a las",
+        "cambiar de hora", "cambiar horario", "cambiar hora", "cambie",
     ],
     "consultar": [
         "consultar", "disponible", "disponibilidad",
@@ -77,7 +79,8 @@ def route_by_keywords(text: str) -> Optional[str]:
     """
     Detecta intención por matching de keywords.
 
-    Returns el intent con mayor número de coincidencias, o None.
+    Si hay ambiguedad entre "cancelar" y "reagendar" (ej. "no puedo" + "para las 12"),
+    favorece "reagendar" porque especificar nueva hora es señal clara de cambio.
     """
     normalized = _normalize(text)
     scores: Dict[str, int] = {}
@@ -88,6 +91,15 @@ def route_by_keywords(text: str) -> Optional[str]:
 
     if not scores:
         return None
+
+    # Resolver ambigedad: si ambas "cancelar" y "reagendar" tienen matches,
+    # priorizar "reagendar" porque mencionar hora nueva es muy específico
+    if len(scores) > 1 and "cancelar" in scores and "reagendar" in scores:
+        # Regex: busca "a las NUM", "para las NUM", "para NUM", etc.
+        time_patterns = r"(a las|para las|para|a) \d{1,2}"
+        if re.search(time_patterns, normalized):
+            return "reagendar"
+
     return max(scores, key=scores.get)
 
 

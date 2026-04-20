@@ -1572,18 +1572,48 @@ async def node_reschedule_appointment(
         logger.info("Nuevo evento creado antes de eliminar viejo", new_event_id=new_event_id)
 
         # 2. Cancelar evento anterior en Google Calendar (solo si nuevo existe)
-        if calendar_service and old_event_id:
+        # Además, cancelar TODOS los eventos futuros del paciente del mismo servicio
+        # para limpiar múltiples citas huérfanas (ej. 10:00, 11:00, 12:00)
+        if calendar_service:
+            if old_event_id:
+                try:
+                    await calendar_service.delete_event(old_event_id)
+                    logger.info("Evento anterior eliminado", event_id=old_event_id)
+                except Exception as e:
+                    logger.warning(
+                        "Error eliminando evento anterior (nuevo evento OK)",
+                        old_event_id=old_event_id,
+                        new_event_id=new_event_id,
+                        error=str(e),
+                    )
+
+            # Limpiar citas huérfanas: buscar TODOS los eventos del paciente del mismo servicio
+            # en los próximos 7 días y cancelar aquellos que NO sean el nuevo
             try:
-                await calendar_service.delete_event(old_event_id)
-                logger.info("Evento anterior eliminado", event_id=old_event_id)
+                phone = state.get("phone_number", "")
+                if phone:
+                    from zoneinfo import ZoneInfo
+                    tz = ZoneInfo("America/Guayaquil")
+                    now = datetime.now(tz)
+                    future = now + timedelta(days=7)
+
+                    orphaned = await calendar_service.search_events_by_query(
+                        q=phone, start_date=now, end_date=future
+                    )
+                    for ev in orphaned:
+                        ev_id = ev.get("id")
+                        # No cancelar el evento nuevo que acaba de crearse
+                        if ev_id and ev_id != new_event_id:
+                            # Verificar que sea del mismo servicio (en el summary)
+                            summary = ev.get("summary", "").lower()
+                            if service.lower() in summary:
+                                try:
+                                    await calendar_service.delete_event(ev_id)
+                                    logger.info("Cita huérfana cancelada", event_id=ev_id)
+                                except Exception as e:
+                                    logger.warning("Error cancelando cita huérfana", event_id=ev_id, error=str(e))
             except Exception as e:
-                # Nuevo evento ya existe — paciente tiene su cita. Viejo queda huérfano.
-                logger.warning(
-                    "Error eliminando evento anterior (nuevo evento OK)",
-                    old_event_id=old_event_id,
-                    new_event_id=new_event_id,
-                    error=str(e),
-                )
+                logger.warning("Error limpiando citas huérfanas (no crítico)", error=str(e))
 
         # 3. Cancelar cita anterior en DB
         if db_service and old_appt_id:
