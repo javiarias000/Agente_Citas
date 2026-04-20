@@ -789,6 +789,19 @@ async def node_book_appointment(
         patient = state.get("patient_name", "Paciente")
         service = state.get("selected_service", "consulta")
 
+        # Si hay cita existente, cancelarla primero (reagendamiento sin ir por prepare_modification)
+        old_event_id = state.get("google_event_id")
+        old_appt_id = state.get("appointment_id")
+        if old_event_id:
+            try:
+                if calendar_service:
+                    await calendar_service.delete_event(old_event_id)
+                    logger.info("[node_book_appointment] cita anterior cancelada", event_id=old_event_id)
+                if db_service and old_appt_id:
+                    await db_service.cancel_appointment(session=None, appointment_id=uuid.UUID(old_appt_id))
+            except Exception as e:
+                logger.warning("[node_book_appointment] error cancelando cita previa (continuando)", error=str(e))
+
         # Crear en Google Calendar
         logger.info(
             "[node_book_appointment] llamando create_event",
