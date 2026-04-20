@@ -24,15 +24,17 @@ BUSINESS_END = 18
 class GoogleCalendarService:
     """Adapter async que envuelve el servicio Google Calendar existente."""
 
-    def __init__(self, calendar_service, db_service=None):
+    def __init__(self, calendar_service, db_service=None, cache=None):
         """
         Args:
             calendar_service: instancia del GoogleCalendarService existente
                               (de services/google_calendar_service.py)
             db_service: AppointmentService opcional para verificar DB local también
+            cache: CalendarCache opcional para Redis caching
         """
         self._svc = calendar_service
         self._db = db_service
+        self._cache = cache
 
     def _slot_to_iso(self, slot: any) -> str:
         """Extrae y convierte un slot a ISO string."""
@@ -48,7 +50,16 @@ class GoogleCalendarService:
         date: datetime,
         duration_minutes: int = 60,
     ) -> List[str]:
-        """Retorna lista de ISO strings de slots disponibles para esa fecha."""
+        """Retorna lista de ISO strings de slots disponibles para esa fecha. Cachea con Redis."""
+        calendar_id = getattr(self._svc, "calendar_id", "default")
+
+        # CHECK CACHE
+        if self._cache:
+            cached = await self._cache.get_slots(calendar_id, date, duration_minutes)
+            if cached is not None:
+                return cached
+
+        # SLOW PATH: obtener de Google Calendar
         try:
             slots = await self._svc.get_available_slots(
                 date=date,
@@ -60,6 +71,11 @@ class GoogleCalendarService:
             iso_slots = [self._slot_to_iso(s) for s in slots if self._slot_to_iso(s)]
             print(f"[calendar] slots raw={len(slots)} iso={len(iso_slots)} date={date.date()}")
             logger.info("Slots disponibles", date=date.date().isoformat(), count=len(iso_slots))
+
+            # SET CACHE
+            if self._cache:
+                await self._cache.set_slots(calendar_id, date, duration_minutes, iso_slots)
+
             return iso_slots
         except Exception as e:
             import traceback
@@ -108,7 +124,7 @@ class GoogleCalendarService:
         description: str = "",
     ) -> tuple[str, str]:
         """
-        Crea evento en Google Calendar.
+        Crea evento en Google Calendar. Invalida cache de slots ese día.
 
         Returns:
             (event_id, html_link)
@@ -127,11 +143,23 @@ class GoogleCalendarService:
             event_id = result.get("id", "")
             html_link = result.get("htmlLink", "")
         logger.info("Evento creado", event_id=event_id, link=html_link)
+
+        # INVALIDATE: nuevo evento cambia disponibilidad de slots
+        if self._cache:
+            calendar_id = getattr(self._svc, "calendar_id", "default")
+            await self._cache.invalidate_day(calendar_id, start)
+
         return event_id, html_link
 
-    async def delete_event(self, event_id: str) -> bool:
+    async def delete_event(self, event_id: str, date: datetime = None) -> bool:
         success = await self._svc.delete_event(event_id)
         logger.info("Evento eliminado", event_id=event_id, success=success)
+
+        # INVALIDATE: si se pasa fecha, invalida cache de ese día
+        if self._cache and date and success:
+            calendar_id = getattr(self._svc, "calendar_id", "default")
+            await self._cache.invalidate_day(calendar_id, date)
+
         return bool(success)
 
     async def update_event(
@@ -148,6 +176,12 @@ class GoogleCalendarService:
             end_time=end,
         )
         logger.info("Evento actualizado", event_id=event_id)
+
+        # INVALIDATE: si se actualiza fecha, invalida cache (al menos del nuevo día)
+        if self._cache and start:
+            calendar_id = getattr(self._svc, "calendar_id", "default")
+            await self._cache.invalidate_day(calendar_id, start)
+
         return event
 
 

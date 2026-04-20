@@ -324,13 +324,37 @@ class ArcadiumAPI:
             self.checkpointer_ctx = PostgresSaver.from_conn_string(pg_url, serde=_serde)
             self.checkpointer = await self.checkpointer_ctx.__aenter__()
 
-            # Usar GoogleCalendarService directamente (API directo, sin MCP)
+            # Redis cache para slots de disponibilidad
+            redis_client = None
+            calendar_cache = None
+            if self.settings.REDIS_URL:
+                try:
+                    import redis.asyncio as aioredis
+                    from src.cache import CalendarCache
+
+                    redis_client = aioredis.from_url(
+                        self.settings.REDIS_URL,
+                        encoding="utf-8",
+                        decode_responses=False,
+                    )
+                    calendar_cache = CalendarCache(redis_client)
+                    logger.info("Redis cache inicializado para slots")
+                except ImportError:
+                    logger.warning("redis no instalado, cache deshabilitado")
+                except Exception as e:
+                    logger.warning("Error inicializando Redis cache", error=str(e))
+
+            # Wrappear GoogleCalendarService con adapter que incluye cache
             wrapped_calendars: Dict[str, Any] = {}
             for email, svc in self._calendar_services.items():
                 try:
-                    # GoogleCalendarService está listo inmediatamente (no necesita initialize)
-                    wrapped_calendars[email] = svc
-                    logger.info("GoogleCalendarService inicializado (API directa)", doctor=email)
+                    from src.calendar_service import GoogleCalendarService as CalendarAdapter
+
+                    wrapped_calendars[email] = CalendarAdapter(
+                        calendar_service=svc,
+                        cache=calendar_cache,
+                    )
+                    logger.info("CalendarAdapter con cache inicializado", doctor=email)
                 except Exception as e:
                     logger.error("Error inicializando calendar para doctor", doctor=email, error=str(e))
 
