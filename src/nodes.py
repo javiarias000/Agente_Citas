@@ -1503,11 +1503,12 @@ async def node_lookup_appointment(
 async def node_prepare_modification(state: ArcadiumState) -> Dict[str, Any]:
     """
     Nodo determinista que prepara el estado para flujos de cancelación/reagendamiento.
-    Se ejecuta ANTES de detect_confirmation para setear confirmation_type
-    basado en el intent ya detectado.
+    Se ejecuta cuando el intent es "cancelar" o "reagendar".
 
-    Sin esto, edge_after_confirm recibe ctype=None y enruta a book_appointment
-    en lugar de cancel_appointment.
+    IMPORTANTE: SIEMPRE actualiza confirmation_type según el intent actual,
+    incluso si hay un valor anterior seteado. Esto previene que confirmation_type
+    de una conversación anterior contamine la nueva (ej. anterior intent="cancelar"
+    dejó confirmation_type="cancel", nueva intent="reagendar" debe actualizar a "reschedule").
     """
     intent = state.get("intent")
     if intent == "cancelar":

@@ -58,6 +58,15 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
     ctype = state.get("confirmation_type")
     slots = state.get("available_slots", [])
 
+    # CRÍTICO: si el intent cambió (ej. anterior "cancelar", nuevo "reagendar"),
+    # debe ir a check_existing_appointment para re-verificar y actualizar confirmation_type
+    # en prepare_modification. NO saltarse a detect_confirmation con ctype obsoleto.
+    previous_ctype_map = {"cancel": "cancelar", "reschedule": "reagendar", "book": "agendar"}
+    ctype_intent = previous_ctype_map.get(ctype)
+    if awaiting and ctype_intent and ctype_intent != intent and intent in ("cancelar", "reagendar", "agendar"):
+        logger.info("edge_after_route_intent: intent cambió, re-verificar", old_intent=ctype_intent, new_intent=intent)
+        return "check_existing_appointment"
+
     # Si esperamos selección Y HAY SLOTS, ir a detect_confirmation
     # (usuario está eligiendo entre opciones)
     if awaiting and slots and ctype in ("book", None) and intent not in ("cancelar", "reagendar"):
@@ -73,8 +82,8 @@ def edge_after_route_intent(state: Dict[str, Any]) -> str:
     if awaiting and slots and intent == "reagendar":
         return "detect_confirmation"
 
-    # Si esperamos confirmación de cancel o reschedule
-    if awaiting and ctype in ("cancel", "reschedule"):
+    # Si esperamos confirmación de cancel o reschedule Y el intent no cambió
+    if awaiting and ctype in ("cancel", "reschedule") and intent == ctype_intent:
         return "detect_confirmation"
 
     if not intent:
