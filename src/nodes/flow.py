@@ -14,6 +14,8 @@ from src.nodes_backup import _last_human_text
 
 logger = structlog.get_logger("langgraph.nodes.flow")
 
+_CHECKPOINT_HISTORY_LIMIT = 9  # Keep last 9 + 1 new = 10 total
+
 
 async def node_entry(
     state: ArcadiumState,

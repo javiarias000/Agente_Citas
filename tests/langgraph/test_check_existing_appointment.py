@@ -7,12 +7,12 @@ Covers all relevant scenarios:
 4. Phone match identifies patient event
 5. Name match only (no phone available)
 6. Name match returns OTHER client's event → filtered out (critical bug regression)
-7. Exact match (same service + same date) → has_existing_appointment True for agendar
-8. Patient event but different service → has_existing_appointment False for agendar
-9. Patient event but different date → has_existing_appointment False for agendar
-10. Cancel intent: any patient event → has_existing_appointment True
-11. Reagendar intent: any patient event → has_existing_appointment True
-12. Exception in calendar → has_existing_appointment False, datetime_preference preserved
+7. Exact match (same service + same date) → calendar_appointment_found True for agendar
+8. Patient event but different service → calendar_appointment_found False for agendar
+9. Patient event but different date → calendar_appointment_found False for agendar
+10. Cancel intent: any patient event → calendar_appointment_found True
+11. Reagendar intent: any patient event → calendar_appointment_found True
+12. Exception in calendar → calendar_appointment_found False, datetime_preference preserved
 13. datetime_preference preserved across all return paths
 14. _no_appointment_found() does NOT contain datetime_preference key
 """
@@ -93,7 +93,7 @@ class TestNoCalendarService:
     async def test_no_calendar_service_returns_false(self):
         state = _make_state()
         result = await node_check_existing_appointment(state, calendar_service=None)
-        assert result["has_existing_appointment"] is False
+        assert result["calendar_appointment_found"] is False
         assert result["calendar_appointment_found"] is False
 
 
@@ -106,7 +106,7 @@ class TestNoPhoneNoName:
         cal = _make_calendar_service()
         state = _make_state(phone="", patient_name="")
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is False
+        assert result["calendar_appointment_found"] is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ class TestNoEvents:
         cal = _make_calendar_service(all_events=[], name_search_events=[])
         state = _make_state(patient_name=PATIENT_NAME, service=SERVICE, datetime_preference=TOMORROW_ISO)
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is False
+        assert result["calendar_appointment_found"] is False
         assert result["calendar_appointment_found"] is False
         assert result["existing_appointments"] == []
         assert result["calendar_total_for_patient"] == 0
@@ -141,7 +141,7 @@ class TestPhoneMatch:
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
         # Event for this phone, same service, same date → exact match
-        assert result["has_existing_appointment"] is True
+        assert result["calendar_appointment_found"] is True
         assert result["calendar_appointment_found"] is True
 
     @pytest.mark.asyncio
@@ -157,7 +157,7 @@ class TestPhoneMatch:
             intent="agendar",
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is True
+        assert result["calendar_appointment_found"] is True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ class TestNameMatchOnly:
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
         # No phone to filter by → name results pass through
-        assert result["has_existing_appointment"] is True
+        assert result["calendar_appointment_found"] is True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -224,8 +224,8 @@ class TestNameMatchOtherClient:
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
 
-        # The other client's event should NOT trigger has_existing_appointment
-        assert result["has_existing_appointment"] is False, (
+        # The other client's event should NOT trigger calendar_appointment_found
+        assert result["calendar_appointment_found"] is False, (
             "BUG: otro cliente's event was incorrectly attributed to requesting client"
         )
         assert result["calendar_appointment_found"] is False
@@ -251,7 +251,7 @@ class TestNameMatchOtherClient:
             intent="agendar",
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is True
+        assert result["calendar_appointment_found"] is True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -274,7 +274,7 @@ class TestExactMatch:
             intent="agendar",
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is True
+        assert result["calendar_appointment_found"] is True
         assert result["calendar_first_match"] is not None
 
 
@@ -300,7 +300,7 @@ class TestDifferentService:
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
         # Different service → no exact match → should not block
-        assert result["has_existing_appointment"] is False
+        assert result["calendar_appointment_found"] is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ class TestDifferentDate:
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
         # Different date → no exact match → should not block
-        assert result["has_existing_appointment"] is False
+        assert result["calendar_appointment_found"] is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -341,7 +341,7 @@ class TestCancelReagendar:
         cal = _make_calendar_service(all_events=[event])
         state = _make_state(phone=PHONE, patient_name=PATIENT_NAME, intent="cancelar")
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is True
+        assert result["calendar_appointment_found"] is True
 
     @pytest.mark.asyncio
     async def test_reagendar_with_any_event_returns_true(self):
@@ -349,14 +349,14 @@ class TestCancelReagendar:
         cal = _make_calendar_service(all_events=[event])
         state = _make_state(phone=PHONE, patient_name=PATIENT_NAME, intent="reagendar")
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is True
+        assert result["calendar_appointment_found"] is True
 
     @pytest.mark.asyncio
     async def test_cancel_no_events_returns_false(self):
         cal = _make_calendar_service(all_events=[], name_search_events=[])
         state = _make_state(phone=PHONE, patient_name=PATIENT_NAME, intent="cancelar")
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is False
+        assert result["calendar_appointment_found"] is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -374,7 +374,7 @@ class TestCalendarException:
             intent="agendar",
         )
         result = await node_check_existing_appointment(state, calendar_service=cal)
-        assert result["has_existing_appointment"] is False
+        assert result["calendar_appointment_found"] is False
         # datetime_preference must be preserved so the booking flow can continue
         assert result.get("datetime_preference") == TOMORROW_ISO
 

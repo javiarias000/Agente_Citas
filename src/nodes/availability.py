@@ -26,6 +26,14 @@ from src.nodes_backup import (
 logger = structlog.get_logger("langgraph.nodes.availability")
 
 
+def _preserve_datetime(result: Dict[str, Any], state: ArcadiumState) -> Dict[str, Any]:
+    """Add datetime_preference to result if it exists in state."""
+    dt_pref = state.get("datetime_preference")
+    if dt_pref and "datetime_preference" not in result:
+        result["datetime_preference"] = dt_pref
+    return result
+
+
 async def node_check_availability(
     state: ArcadiumState,
     *,
@@ -359,22 +367,23 @@ async def node_check_existing_appointment(
 
     DETERMINISTA — cero LLM.
     """
+    dt_pref = state.get("datetime_preference")
+
     # ── Guard: sin calendar_service ──────────────────────────────────────────
     calendar_service = _resolve_calendar_service(state, calendar_services, calendar_service)
     if not calendar_service:
         logger.warning("node_check_existing_appointment: sin calendar_service")
-        return _no_appointment_found()
+        return _preserve_datetime(_no_appointment_found(), state)
 
     phone = state.get("phone_number", "")
     patient_name = (state.get("patient_name") or "").strip()
     service = (state.get("selected_service") or "").strip().lower()
-    dt_pref = state.get("datetime_preference")
     intent = state.get("intent", "")
 
     # ── Guard: sin ningún identificador del paciente ─────────────────────────
     if not phone and not patient_name:
         logger.warning("node_check_existing_appointment: sin teléfono ni nombre")
-        return _no_appointment_found()
+        return _preserve_datetime(_no_appointment_found(), state)
 
     try:
         tz = ZoneInfo("America/Guayaquil")
@@ -461,10 +470,10 @@ async def node_check_existing_appointment(
             )
             # Calcular slots_available del día solicitado aunque no haya cita del paciente
             slots_avail = _compute_slots_available(all_events, requested_day, service, tz, state)
-            return {
+            return _preserve_datetime({
                 **_no_appointment_found(),
                 "calendar_slots_available": slots_avail,
-            }
+            }, state)
 
         # ── Refinar: coincidencia con servicio+día solicitado ─────────────────
         # Esto responde la pregunta "¿ya tiene una cita para ESTE servicio en ESTE día?"
@@ -517,7 +526,7 @@ async def node_check_existing_appointment(
         # Si aún no se conoce la fecha solicitada (datetime_preference=None) se asume
         # sin conflicto y se deja que check_missing recoja la fecha primero.
         if intent in ("cancelar", "reagendar"):
-            return {
+            return _preserve_datetime({
                 "calendar_lookup_done": True,
                 "calendar_appointment_found": True,
                 "existing_appointments": existing,
@@ -527,7 +536,7 @@ async def node_check_existing_appointment(
                 "google_event_id": first["event_id"],
                 "google_event_link": first["html_link"],
                 "patient_name": patient_name,  # Auto-filled from existing appointment
-            }
+            }, state)
 
         # intent == "agendar" (o cualquier otro): comprobar si hay conflicto de día
         same_day_conflict = False
@@ -552,7 +561,7 @@ async def node_check_existing_appointment(
                 requested=requested_day.date().isoformat(),
                 existing_start=first["start"],
             )
-            return {
+            return _preserve_datetime({
                 "calendar_lookup_done": True,
                 "calendar_appointment_found": True,
                 "existing_appointments": existing,
@@ -562,7 +571,7 @@ async def node_check_existing_appointment(
                 "google_event_id": first["event_id"],
                 "google_event_link": first["html_link"],
                 "patient_name": patient_name,  # Auto-filled from existing appointment
-            }
+            }, state)
 
         # Sin conflicto de día (cita en otro día o fecha aún desconocida):
         # NO establecer calendar_appointment_found=True ni google_event_id.
@@ -573,7 +582,7 @@ async def node_check_existing_appointment(
             requested=requested_day.date().isoformat() if requested_day else "desconocida",
             existing_start=first["start"],
         )
-        return {
+        return _preserve_datetime({
             "calendar_lookup_done": True,
             "calendar_appointment_found": False,   # no hay conflicto para la nueva cita
             "existing_appointments": existing,     # mantener para contexto informativo
@@ -583,7 +592,7 @@ async def node_check_existing_appointment(
             "google_event_id": None,               # no tocar el event_id del booking actual
             "google_event_link": None,
             "patient_name": patient_name,  # Auto-filled from existing appointment
-        }
+        }, state)
 
     except Exception as e:
         logger.error("node_check_existing_appointment: error", error=str(e))

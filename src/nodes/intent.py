@@ -6,9 +6,10 @@ from typing import Any, Dict, Optional
 
 import structlog
 
-from src.state import ArcadiumState, VALID_SERVICES
+from src.state import ArcadiumState, VALID_SERVICES, get_missing_fields
 from src.llm_extractors import extract_intent_llm, extract_booking_data
 from src.nodes_backup import _last_human_text
+from config.calendar_mapping import get_email_for_short_key
 
 logger = structlog.get_logger("langgraph.nodes.intent")
 
