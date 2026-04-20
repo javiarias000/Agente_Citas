@@ -1,22 +1,29 @@
 """
 Módulo nodes refactorizado.
 
-Por compatibilidad, re-exporta desde nodes_backup.py mientras se migran
-las funciones a archivos específicos.
+Estructura actual:
+- cancel.py: node_cancel_appointment ✓ migrado
+- reschedule.py: node_reschedule_appointment, node_prepare_modification ✓ migrado
+- booking.py: node_book_appointment, node_detect_confirmation, node_validate_and_confirm ✓ migrado
+- _helpers.py: funciones _privadas compartidas (próximo)
+- flow.py: node_entry, node_route_intent, node_save_state (próximo)
+- intent.py: node_extract_intent, node_extract_data (próximo)
+- availability.py: check_availability, check_missing, check_existing_appointment, lookup_appointment (próximo)
+- response.py: generate_response, generate_response_with_tools, get_appointment_history, execute_memory_tools (próximo)
 
-Estructura final:
-- _helpers.py: funciones _privadas compartidas
-- flow.py: node_entry, node_route_intent, node_save_state
-- intent.py: node_extract_intent, node_extract_data
-- availability.py: check_availability, check_missing, check_existing_appointment, lookup_appointment
-- booking.py: book_appointment, detect_confirmation, validate_and_confirm
-- reschedule.py: reschedule_appointment, prepare_modification
-- cancel.py: cancel_appointment
-- response.py: generate_response, generate_response_with_tools, get_appointment_history, execute_memory_tools
+Por compatibilidad, funciones aún en nodes_backup.py se re-exportan desde aquí.
 """
 
-# Importar todo desde nodes_backup.py para mantener compatibilidad
-# Esto permite que graph.py y otros módulos NO necesiten cambiar imports
+# Importar funciones ya migradas a módulos específicos
+from src.nodes.cancel import node_cancel_appointment
+from src.nodes.reschedule import node_reschedule_appointment, node_prepare_modification
+from src.nodes.booking import (
+    node_book_appointment,
+    node_detect_confirmation,
+    node_validate_and_confirm,
+)
+
+# Importar el resto desde nodes_backup.py (aún no migrado)
 from src.nodes_backup import (
     # Helpers
     _resolve_calendar_service,
@@ -48,15 +55,6 @@ from src.nodes_backup import (
     node_adjust_weekend,
     node_check_existing_appointment,
     node_lookup_appointment,
-    # Booking
-    node_book_appointment,
-    node_detect_confirmation,
-    node_validate_and_confirm,
-    # Reschedule
-    node_reschedule_appointment,
-    node_prepare_modification,
-    # Cancel
-    node_cancel_appointment,
     # Response
     node_generate_response,
     node_generate_response_with_tools,
