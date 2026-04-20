@@ -44,14 +44,14 @@ def compare_slots(pref_str: str, slot_str: str) -> bool:
     )
 
 
-def find_closest_slot(pref_str: str, available_slots: list, max_delta_minutes: int = 60) -> Optional[str]:
+def find_closest_slot(pref_str: str, available_slots: list, max_delta_minutes: int | None = 60) -> Optional[str]:
     """
     Busca el slot más cercano a una preferencia de fecha/hora.
 
     Args:
         pref_str: ISO datetime string de la preferencia del usuario
         available_slots: lista de ISO datetime strings
-        max_delta_minutes: máxima diferencia en minutos permitida (default 60)
+        max_delta_minutes: máxima diferencia en minutos permitida (default 60), None = sin límite
 
     Returns:
         El slot más cercano si está dentro de max_delta_minutes, sino None
@@ -91,7 +91,8 @@ def find_closest_slot(pref_str: str, available_slots: list, max_delta_minutes: i
             closest_delta = delta
             closest_slot = slot_str
 
-    if closest_slot and closest_delta <= max_delta_minutes:
-        return closest_slot
+    if closest_slot:
+        if max_delta_minutes is None or closest_delta <= max_delta_minutes:
+            return closest_slot
 
     return None

@@ -582,6 +582,7 @@ async def node_match_closest_slot(state: ArcadiumState) -> Dict[str, Any]:
     pero hay un slot dentro de 60 minutos, setear selected_slot = closest_slot
     para que se intente el booking automático.
 
+    Solo hace matching para intent "agendar". Para "consultar", solo lista slots.
     Sin LLM. Determinista.
     """
     from utils.date_utils import compare_slots, find_closest_slot
@@ -590,6 +591,13 @@ async def node_match_closest_slot(state: ArcadiumState) -> Dict[str, Any]:
 
     available_slots = state.get("available_slots", [])
     datetime_pref = state.get("datetime_preference")
+    intent = state.get("intent")
+
+    # Solo SALTEAR matching para intent "consultar" (check availability sin booking)
+    # Para "agendar", None, o cualquier otro intent, hacer matching automático
+    if intent == "consultar":
+        logger.info("NODE_MATCH_CLOSEST_SLOT: intent es consultar, no seleccionar slot")
+        return {}
 
     if not datetime_pref or not available_slots:
         # Sin preferencia o sin slots, no hay nada que hacer
@@ -617,10 +625,24 @@ async def node_match_closest_slot(state: ArcadiumState) -> Dict[str, Any]:
         )
         return {
             "selected_slot": closest,
-            "preference_adjusted": True,  # Flag para que generate_response sepa que ajustamos
+            "preference_adjusted": True,
         }
 
-    # No hay closest slot dentro del rango
+    # Si intent es "agendar" y no hay slot dentro de 60 min, aceptar el más cercano
+    # Para otros intents, mantener strict 60-minute limit
+    if intent == "agendar":
+        closest_any = find_closest_slot(datetime_pref, available_slots, max_delta_minutes=None)
+        if closest_any:
+            logger.info(
+                "node_match_closest_slot: closest slot sin tiempo límite (intent=agendar)",
+                pref=datetime_pref,
+                closest=closest_any,
+            )
+            return {
+                "selected_slot": closest_any,
+                "preference_adjusted": True,
+            }
+
     logger.info(
         "node_match_closest_slot: sin closest slot en rango",
         pref=datetime_pref,
@@ -724,6 +746,7 @@ async def node_book_appointment(
     calendar_service=None,
     calendar_services=None,
     db_service=None,
+    store=None,
 ) -> Dict[str, Any]:
     """
     Agenda en Google Calendar y DB.

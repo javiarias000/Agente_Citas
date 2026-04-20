@@ -98,6 +98,7 @@ def build_graph(
             calendar_service=calendar_service,
             calendar_services=calendar_services,
             db_service=db_service,
+            store=store,
         ),
     )
     graph.add_node(
