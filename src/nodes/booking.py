@@ -60,6 +60,35 @@ async def node_book_appointment(
         patient = state.get("patient_name", "Paciente")
         service = state.get("selected_service", "consulta")
 
+        # ── GUARD: Validar límite de citas por día (máx 5) ─────────────────────
+        # Si ya hay 5 citas en este día, rechazar la nueva
+        MAX_CITAS_POR_DIA = 5
+        existing_appts = state.get("existing_appointments", [])
+        citas_hoy = 0
+        if existing_appts:
+            dt_date = dt.date()
+            for appt in existing_appts:
+                appt_start_str = appt.get("start", "")
+                if appt_start_str:
+                    try:
+                        appt_dt = datetime.fromisoformat(appt_start_str)
+                        if appt_dt.date() == dt_date:
+                            citas_hoy += 1
+                    except ValueError:
+                        pass
+
+        if citas_hoy >= MAX_CITAS_POR_DIA:
+            logger.warning(
+                "[node_book_appointment] límite de citas/día alcanzado",
+                fecha=dt.date().isoformat(),
+                citas=citas_hoy,
+                max=MAX_CITAS_POR_DIA,
+            )
+            return {
+                "last_error": f"El consultorio está lleno para {dt.strftime('%d/%m')}. Máximo {MAX_CITAS_POR_DIA} citas por día. Por favor intente otro día.",
+                "should_escalate": False,
+            }
+
         # Si hay cita existente, cancelarla primero (reagendamiento sin ir por prepare_modification)
         old_event_id = state.get("google_event_id")
         old_appt_id = state.get("appointment_id")

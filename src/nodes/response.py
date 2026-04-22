@@ -326,8 +326,11 @@ async def node_generate_response_with_tools(
     # IMPORTANTE: Solo aplica si el booking NO ha sido ejecutado aún.
     # Si confirmation_sent + google_event_id → la cita ya fue creada, estas guards no aplican.
     booking_done = bool(google_event_id and confirmation_sent)
-    if not booking_done and lookup_done and cal_found and existing_appts and intent == "agendar":
-        # Usuario quiere agendar pero YA TIENE cita(s)
+    if not booking_done and lookup_done and existing_appts and intent == "agendar":
+        # Usuario quiere agendar y YA TIENE cita(s).
+        # CRÍTICO: Informar SIEMPRE que hay citas existentes, sin importar si conocemos
+        # la fecha solicitada (cal_found). El usuario está pidiendo agendar; DEBE saber
+        # que ya tiene citas.
         lines = []
         for appt in existing_appts[:2]:
             svc_name = appt.get("summary", "cita")
@@ -335,25 +338,10 @@ async def node_generate_response_with_tools(
             lines.append(f"• {svc_name} — {_format_datetime_readable(start_dt)}")
         appts_str = "\n".join(lines)
         context_parts.append(
-            f"SITUACIÓN REAL: Se consultó Google Calendar y el paciente YA TIENE cita(s) agendada(s):\n"
+            f"INFORMACIÓN CRÍTICA: Se consultó Google Calendar y el paciente YA TIENE cita(s) agendada(s):\n"
             f"{appts_str}\n"
             "Informa al usuario sobre su(s) cita(s) existente(s) y pregunta si desea "
             "reagendar, cancelar o agregar una cita adicional."
-        )
-    elif not booking_done and lookup_done and not cal_found and existing_appts and intent == "agendar":
-        # Calendar verificado: hay citas futuras pero en OTROS días (sin conflicto hoy).
-        # Informar como contexto SIN bloquear el nuevo agendamiento.
-        lines = []
-        for appt in existing_appts[:2]:
-            svc_name = appt.get("summary", "cita")
-            start_dt = appt.get("start", "")
-            lines.append(f"• {svc_name} — {_format_datetime_readable(start_dt)}")
-        context_parts.append(
-            f"ℹ️ CONTEXTO: El paciente tiene cita(s) en otro(s) día(s):\n"
-            + "\n".join(lines)
-            + "\nEstas citas NO interfieren con el nuevo agendamiento solicitado. "
-            "Procede a agendar la nueva cita para la fecha solicitada. "
-            "Puedes mencionarlas brevemente si es relevante."
         )
     elif not booking_done and lookup_done and not cal_found and not existing_appts and intent == "agendar":
         # Verificación real en Calendar: este usuario no tiene ninguna cita futura.
@@ -434,7 +422,13 @@ async def node_generate_response_with_tools(
             )
 
     error = context_dict.get("last_error")
-    if error:
+    # IMPORTANTE: Si confirmation_sent=True y google_event_id existe,
+    # NO incluir last_error aunque esté presente. El error es residual de
+    # una búsqueda fallida previa; no aplica cuando la cita ya fue creada.
+    # TAMBIÉN: si hay existing_appointments, el error de "sin disponibilidad"
+    # es engañoso — el usuario YA TIENE citas. No mostrar el error.
+    has_existing = bool(existing_appts)
+    if error and not (confirmation_sent and google_event_id) and not has_existing:
         context_parts.append(f"Error ocurrido: {error}. Sugiere llamar a la clínica.")
         # Si no hay appointment_id ni calendar credentials, guiar a la clínica
         if not appt_id and not context_dict.get("google_event_id"):

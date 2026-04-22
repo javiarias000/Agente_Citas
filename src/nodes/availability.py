@@ -42,6 +42,7 @@ async def node_check_availability(
 ) -> Dict[str, Any]:
     """
     Consulta slots disponibles vía Google Calendar.
+    CRÍTICO: Filtra slots que ya están ocupados por OTRAS citas.
     Convierte los dicts de slot a ISO strings para que sean serializables
     y compatibles con extract_slot_from_text.
     Sin LLM.
@@ -57,6 +58,10 @@ async def node_check_availability(
             if not dt_iso
             else "Calendar service no disponible",
         }
+
+    # Obtener citas existentes para filtrar slots ocupados
+    phone = state.get("phone_number", "")
+    existing_appts = state.get("existing_appointments", [])
 
     try:
         dt = datetime.fromisoformat(dt_iso)
@@ -87,6 +92,7 @@ async def node_check_availability(
 
         # Normalizar a ISO strings para facilitar comparación y serialización,
         # filtrando slots que ya pasaron (solo relevante cuando la fecha es hoy).
+        # ANTI-OVERBOOKING: Filtrar slots que colisionan con citas existentes.
         slots_iso = []
         for s in slots:
             if isinstance(s, dict):
@@ -107,8 +113,7 @@ async def node_check_availability(
                 except ValueError:
                     slot_dt = None
 
-            # Filtrar slots pasados: si el slot no tiene timezone, lo comparamos
-            # como naive (asumiendo Ecuador local). Si tiene timezone, comparamos aware.
+            # ── FILTRO 1: Slots pasados ──────────────────────────────────────
             if slot_dt is not None:
                 if slot_dt.tzinfo is not None:
                     if slot_dt <= now_ec:
@@ -116,6 +121,41 @@ async def node_check_availability(
                 else:
                     if slot_dt <= now_ec.replace(tzinfo=None):
                         continue  # slot ya pasó (naive comparison)
+
+            # ── FILTRO 2: ANTI-OVERBOOKING — Colisión con citas existentes ──
+            # Si hay una cita existente en [slot_start, slot_start+duration),
+            # el slot está OCUPADO y se filtra.
+            slot_occupied = False
+            if slot_dt and duration and existing_appts:
+                slot_end = slot_dt + timedelta(minutes=duration)
+                for appt in existing_appts:
+                    appt_start_str = appt.get("start", "")
+                    if not appt_start_str:
+                        continue
+                    try:
+                        appt_start = datetime.fromisoformat(appt_start_str)
+                        # Normalizar timezone si es necesario
+                        if appt_start.tzinfo is None:
+                            appt_start = appt_start.replace(tzinfo=tz)
+                        # Duración de la cita existente (asumir 60 min si no se conoce)
+                        appt_duration = 60
+                        appt_end = appt_start + timedelta(minutes=appt_duration)
+
+                        # ¿El slot colisiona con esta cita?
+                        # Colisión si: slot_start < appt_end AND slot_end > appt_start
+                        if slot_dt < appt_end and slot_end > appt_start:
+                            logger.info(
+                                "node_check_availability: slot ocupado (colisión)",
+                                slot=slot_iso,
+                                appt_start=appt_start_str,
+                            )
+                            slot_occupied = True
+                            break
+                    except (ValueError, AttributeError):
+                        pass
+
+            if slot_occupied:
+                continue  # No incluir este slot
 
             slots_iso.append(slot_iso)
 
@@ -144,12 +184,35 @@ async def node_check_availability(
                             slot_iso = str(s)
                         try:
                             slot_dt = datetime.fromisoformat(str(slot_iso))
+                            # Filtro 1: Slots pasados
                             if slot_dt.tzinfo is not None:
                                 if slot_dt <= now_ec:
                                     continue
                             else:
                                 if slot_dt <= now_ec.replace(tzinfo=None):
                                     continue
+
+                            # Filtro 2: ANTI-OVERBOOKING en fallback también
+                            slot_occupied = False
+                            if duration and existing_appts:
+                                slot_end = slot_dt + timedelta(minutes=duration)
+                                for appt in existing_appts:
+                                    appt_start_str = appt.get("start", "")
+                                    if not appt_start_str:
+                                        continue
+                                    try:
+                                        appt_start = datetime.fromisoformat(appt_start_str)
+                                        if appt_start.tzinfo is None:
+                                            appt_start = appt_start.replace(tzinfo=tz)
+                                        appt_end = appt_start + timedelta(minutes=60)
+                                        if slot_dt < appt_end and slot_end > appt_start:
+                                            slot_occupied = True
+                                            break
+                                    except (ValueError, AttributeError):
+                                        pass
+
+                            if slot_occupied:
+                                continue
                         except:
                             pass
                         next_slots_iso.append(slot_iso)
